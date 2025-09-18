@@ -1,0 +1,211 @@
+<!-- Calculadora Eliardo Imobiliária — V46.0 (Front-end da API) -->
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" /><title>Simule seu financiamento</title>
+    <style>
+        :root{--pri:#0056b3;--ok:#28a745;--line:#e9ecef;--bg:#f8f9fa;--txt:#2c3e50;--load:#3498db;}
+        body{margin:0;background:#fff;font-family:Montserrat,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
+        .calc{max-width:760px;margin:36px auto;padding:36px;border:1px solid var(--line);border-radius:14px;box-shadow:0 10px 28px rgba(0,0,0,.06)}
+        header{position:relative}
+        h3{margin:0 0 26px;text-align:center;background:var(--pri);color:#fff;padding:14px 50px 14px 18px;border-radius:8px;font-size:22px}
+        .grid{display:grid;grid-template-columns:1fr 1fr;gap:20px}
+        .full{grid-column:1/-1}
+        label{display:block;margin:0 0 8px;font-weight:600;color:#495057;font-size:14px}
+        input,select{width:100%;padding:14px;border:1px solid #ced4da;border-radius:8px;font-size:16px;box-sizing:border-box;transition:.15s}
+        input:focus,select:focus{outline:none;border-color:var(--ok);box-shadow:0 0 0 3px rgba(40,167,69,.15)}
+        .checks{display:flex;flex-direction:column;gap:10px}
+        .checks .item{display:flex;align-items:center}
+        .checks input{width:auto;margin-right:10px;transform:scale(1.08)}
+        .checks .item label {margin-bottom: 0;}
+        button{width:100%;margin-top:12px;padding:15px;border:0;border-radius:8px;background:var(--ok);color:#fff;font-weight:700;letter-spacing:.2px;cursor:pointer;position:relative;overflow:hidden;}
+        button:hover{background:#1e7e34}
+        button .loader { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(255, 255, 255, 0.2); display: flex; justify-content: center; align-items: center; visibility: hidden; }
+        button .spinner { border: 4px solid #f3f3f3; border-top: 4px solid var(--load); border-radius: 50%; width: 25px; height: 25px; animation: spin 1s linear infinite; }
+        button.loading .loader { visibility: visible; }
+        button.loading span { visibility: hidden; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        #res{display:none;margin-top:24px}
+        .card{background:var(--bg);border-left:5px solid var(--ok);border-radius:10px;padding:18px;margin-bottom:16px}
+        .card.error{border-left-color: #e74c3c;}
+        .card h4{margin:0 0 10px;color:var(--txt);font-size:17px}
+        .row{display:flex;justify-content:space-between;gap:10px;padding:9px 0;border-bottom:1px solid var(--line);font-size:15px}
+        .row:last-child{border-bottom:none}
+        .row strong{font-weight:600;color:#495057}
+        .row span{font-weight:700}
+        .muted{color:#6c757d;font-size:13.5px;line-height:1.6;text-align:justify;}
+        .custos-adicionais { margin-top: 10px; }
+        details{margin-top:24px;padding-top:18px;border-top:1px solid var(--line);}
+        summary{font-weight:700;cursor:pointer;color:#34495e}
+        @media (max-width:768px){.grid{grid-template-columns:1fr}}
+    </style>
+</head>
+<body>
+    <div class="calc">
+      <header><h3>Simule seu financiamento</h3></header>
+      <div class="grid">
+        <div><label for="pv">Valor aproximado do imóvel</label><input id="pv" inputmode="numeric" placeholder="Ex: 250.000,00"></div>
+        <div><label for="cat">Tipo de financiamento</label><select id="cat"><option value="novo" selected>Aquisição de Imóvel Novo</option><option value="usado">Aquisição de Imóvel Usado</option></select></div>
+      </div>
+      <div class="grid">
+        <div><label for="renda">Renda bruta familiar mensal</label><input id="renda" inputmode="numeric" placeholder="Ex: 3.500,00"></div>
+        <div><label for="nasc">Data de nascimento (mais velho)</label><input id="nasc" placeholder="DD/MM/AAAA"></div>
+      </div>
+      <div class="grid">
+        <div class="full"><label for="nome">Seu nome</label><input id="nome" placeholder="Nome completo"></div>
+      </div>
+      <div class="grid">
+        <div><label for="mail">Melhor e-mail</label><input id="mail" type="email" placeholder="seu@email.com"></div>
+        <div><label for="fone">Celular (WhatsApp)</label><input id="fone" type="tel" placeholder="(15) 99999-9999"></div>
+      </div>
+      <div class="grid">
+        <div class="full checks">
+          <div id="fgts-wrapper" class="item"><input id="fgts" type="checkbox"><label for="fgts">Tenho 3 anos de trabalho com FGTS (somando períodos)</label></div>
+          <div id="subsidio-wrapper" class="item"><input id="subsidioRecebido" type="checkbox"><label for="subsidioRecebido">Já recebi benefício habitacional do governo (FGTS/União)</label></div>
+          <div class="item"><input id="co" type="checkbox"><label for="co">Mais de um comprador e/ou dependente</label></div>
+        </div>
+      </div>
+      <button id="go">
+        <span>Ver minha simulação</span>
+        <div class="loader"><div class="spinner"></div></div>
+      </button>
+      <div id="res"></div>
+      <details>
+        <summary>Informações importantes</summary>
+        <p class="muted">A Eliardo Imobiliária oferece este simulador como uma ferramenta para ajudar você a planejar a conquista do seu imóvel. Os resultados fornecem valores aproximados e servem como uma primeira estimativa.</p>
+        <p class="muted">Lembre-se: os valores podem variar de acordo com a análise de crédito de cada perfil, alterações nas taxas de juros e políticas das instituições financeiras. A simulação não constitui uma proposta formal de crédito.</p>
+        <p class="muted">Ao utilizar a ferramenta, você concorda que os resultados têm finalidade informativa. É fundamental validar todas as informações com um de nossos corretores antes de tomar qualquer decisão financeira.</p>
+      </details>
+    </div>
+
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+    // FUNÇÕES DE FORMATAÇÃO E VALIDAÇÃO (SEGUEM NO NAVEGADOR)
+    const fmtIn = el => { let v = el.value.replace(/\D/g,''); el.value = v ? (parseInt(v,10)/100).toLocaleString('pt-BR',{minimumFractionDigits:2}) : '' };
+    const toNum = v => v ? parseFloat(v.replace(/\./g,'').replace(',','.')) || 0 : 0;
+    const fmtDate = el => { let v = el.value.replace(/\D/g,'').slice(0,8); el.value = v.length>4 ? v.slice(0,2)+'/'+v.slice(2,4)+'/'+v.slice(4) : v.length>2 ? v.slice(0,2)+'/'+v.slice(2) : v };
+    const fmtPhone = el => { let v=el.value.replace(/\D/g,'').slice(0,11); v=v.replace(/^(\d{2})(\d)/g,'($1) $2'); v=v.replace(/(\d{5})(\d)/,'$1-$2'); el.value=v };
+    const isValidEmail = mail => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(mail);
+    const BRL = n => 'R$ '+(n||0).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});
+
+    const pvEl = document.getElementById('pv'), rendaEl = document.getElementById('renda'), nascEl = document.getElementById('nasc'), catEl = document.getElementById('cat');
+    const nomeEl = document.getElementById('nome'), mailEl = document.getElementById('mail'), foneEl = document.getElementById('fone');
+    const fgtsEl = document.getElementById('fgts'), subsidioRecebidoEl = document.getElementById('subsidioRecebido'), coEl = document.getElementById('co');
+    const fgtsWrapper = document.getElementById('fgts-wrapper'), subsidioWrapper = document.getElementById('subsidio-wrapper');
+    const goBtn = document.getElementById('go'), resEl = document.getElementById('res');
+
+    // MÁSCARAS E EVENTOS DE INTERFACE
+    pvEl.addEventListener('input', () => {
+        fmtIn(pvEl);
+        const V = toNum(pvEl.value);
+        const showFgtsOptions = V <= 1500000;
+        fgtsWrapper.style.display = showFgtsOptions ? 'flex' : 'none';
+        subsidioWrapper.style.display = showFgtsOptions ? 'flex' : 'none';
+        if (!showFgtsOptions) { fgtsEl.checked = false; subsidioRecebidoEl.checked = false; }
+    });
+    rendaEl.addEventListener('input', () => fmtIn(rendaEl));
+    nascEl.addEventListener('input', () => fmtDate(nascEl));
+    foneEl.addEventListener('input', () => fmtPhone(foneEl));
+    
+    // BOTÃO DE SIMULAÇÃO - AGORA CHAMA A API
+    goBtn.addEventListener('click', async () => {
+        const payload = {
+            valorImovel: toNum(pvEl.value), renda: toNum(rendaEl.value), categoria: catEl.value,
+            dataNascimento: nascEl.value, nome: nomeEl.value.trim(), email: mailEl.value.trim(),
+            telefone: foneEl.value.trim(), temFgts: fgtsEl.checked,
+            recebeuSubsidio: subsidioRecebidoEl.checked, temCo: coEl.checked
+        };
+        
+        let errors = [];
+        if (!payload.valorImovel) errors.push('• Preencha o Valor do imóvel.');
+        if (!payload.renda) errors.push('• Preencha a Renda familiar.');
+        if (!payload.dataNascimento || payload.dataNascimento.length < 10) errors.push('• Preencha uma Data de nascimento válida (DD/MM/AAAA).');
+        if (payload.nome.length < 3) errors.push('• Preencha seu Nome completo.');
+        if (!isValidEmail(payload.email)) errors.push('• Preencha um E-mail válido.');
+        if (payload.telefone.replace(/\D/g, '').length < 11) errors.push('• Preencha um Celular válido com DDD.');
+        if (errors.length > 0) { alert('Por favor, corrija os seguintes erros:\n\n' + errors.join('\n')); return; }
+
+        goBtn.classList.add('loading');
+        resEl.style.display = 'none';
+
+        try {
+            // A CHAMADA PARA A "RECEITA SECRETA"
+            const response = await fetch('/.netlify/functions/calcular', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            
+            const result = await response.json();
+            
+            if (result.error) {
+                throw new Error(result.error);
+            }
+            
+            // EXIBIÇÃO DO RESULTADO (RECEBIDO PRONTO DO SERVIDOR)
+            resEl.innerHTML = `
+                <div class="card">
+                    <h4>${result.linha}</h4>
+                    <div class="row"><strong>Local padrão</strong><span>Sorocaba/SP</span></div>
+                    <div class="row"><strong>Valor do imóvel</strong><span>${BRL(result.V)}</span></div>
+                    <div class="row"><strong>Prazo máximo</strong><span>${result.prazoMaxAnos * 12} meses</span></div>
+                    <div class="row"><strong>Prazo escolhido</strong><span>${result.prazoMaxAnos * 12} meses</span></div>
+                    <div class="row"><strong>Taxa de juros (nominal)</strong><span>${result.taxaJuros.toFixed(2)}% a.a.</span></div>
+                    <div class="row"><strong>Subsídio do Governo Federal</strong><span>${result.subsidio > 0 ? BRL(result.subsidio) : '—'}</span></div>
+                </div>
+                ${result.resSac.fv > 0 ? `<div class="card">
+                    <h4>Opção 1 — Sistema SAC</h4>
+                    <div class="row"><strong>Cota de financiamento</strong><span>${(result.ltvSac*100).toFixed(0)}%</span></div>
+                    <div class="row"><strong>Valor da entrada</strong><span>${BRL(result.entradaSac)}</span></div>
+                    <div class="row"><strong>Valor do financiamento</strong><span>${BRL(result.resSac.fv)}</span></div>
+                    <div class="row"><strong>1ª prestação</strong><span>${BRL(result.resSac.p1)}</span></div>
+                    <div class="row"><strong>Última prestação</strong><span>${BRL(result.resSac.pf)}</span></div>
+                </div>` : ''}
+                ${result.resPrice.fv > 0 ? `<div class="card">
+                    <h4>Opção 2 — Sistema PRICE</h4>
+                    <div class="row"><strong>Cota de financiamento</strong><span>${(result.ltvPrice*100).toFixed(0)}%</span></div>
+                    <div class="row"><strong>Valor da entrada</strong><span>${BRL(result.entradaPrice)}</span></div>
+                    <div class="row"><strong>Valor do financiamento</strong><span>${BRL(result.resPrice.fv)}</span></div>
+                    <div class="row"><strong>Parcela fixa mensal</strong><span>${BRL(result.resPrice.p1)}</span></div>
+                </div>` : ''}
+                <div class="card custos-adicionais">
+                    <p class="muted">* <strong>Custos Totais de Aquisição e Uso do FGTS:</strong> Para uma compra segura, lembre-se que, além da entrada, existem os custos de documentação e transferência. Estes valores, que incluem ITBI, taxas de cartório e bancárias, geralmente correspondem a 4,5% do valor do imóvel. No seu caso, provisione aproximadamente <strong>${BRL(result.custosDoc)}</strong> para estas despesas. ${result.V <= 1500000 ? 'Uma ótima notícia é que o saldo do seu FGTS pode ser usado para compor o valor da entrada, o que pode reduzir significativamente a sua necessidade de recursos próprios.' : 'Lembre-se que para imóveis acima de R$ 1,5 milhão (SFI), não é permitido o uso do FGTS.'}</p>
+                </div>
+            `;
+            resEl.style.display = 'block';
+
+        } catch (err) {
+            resEl.innerHTML = `<div class="card error"><p class="muted">${err.message}</p></div>`;
+            resEl.style.display = 'block';
+        } finally {
+            goBtn.classList.remove('loading');
+        }
+    });
+});
+</script>
+
+<!-- Script para preencher dados da URL -->
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+  try {
+    const qs = new URLSearchParams(location.search);
+    const valor = qs.get('valor');
+    const categoria = (qs.get('categoria') || '').toLowerCase();
+    const pvEl = document.getElementById('pv');
+    const catEl = document.getElementById('cat');
+    if (valor && pvEl) {
+      const n = parseFloat(valor.replace(/\./g, '').replace(',', '.'));
+      if (isFinite(n)) {
+        pvEl.value = n.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        pvEl.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+    }
+    if (categoria && catEl) {
+      const norm = /nov|new/.test(categoria) ? 'novo' : 'usado';
+      catEl.value = norm;
+    }
+  } catch (e) { console.error("Erro ao preencher dados da URL:", e); }
+});
+</script>
+</body>
+</html>
