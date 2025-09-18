@@ -1,10 +1,79 @@
-// ARQUIVO DA LÓGICA SECRETA (V46.0)
+// ARQUIVO DA LÓGICA SECRETA (V48.1 - COM CORREÇÃO DE CORS)
 // Este código roda no servidor da Netlify, protegido de cópias.
 
-// Helpers - Funções que o cálculo precisa
+// Helpers
 const toNum = v => v ? parseFloat(String(v).replace(/\./g, '').replace(',', '.')) || 0 : 0;
 
-// REGRAS CENTRALIZADAS (SUA VANTAGEM COMPETITIVA)
+// REGRAS CENTRALIZADAS
+const REGRAS = { /* ... A estrutura de regras permanece idêntica ... */ };
+
+// FUNÇÕES DE CÁLCULO
+function resolverFaixa(/*...*/) { /* ... A função permanece idêntica ... */ }
+function getSubsidioMCMV(/*...*/) { /* ... A função permanece idêntica ... */ }
+function pricePMT(/*...*/) { /* ... A função permanece idêntica ... */ }
+function resolverFinanciamentoMax(/*...*/) { /* ... A função permanece idêntica ... */ }
+// OBS: O corpo das funções foi omitido aqui para brevidade, mas está completo no código abaixo.
+
+// O "CABEÇALHO" QUE A NETLIFY PRECISA
+exports.handler = async (event, context) => {
+    // --- INÍCIO DA CORREÇÃO DE CORS ---
+    // Define quais domínios podem acessar esta API.
+    const allowedOrigins = ['https://eliardosousa.com.br', 'https://www.eliardosousa.com.br'];
+    const origin = event.headers.origin;
+    
+    // Configura os cabeçalhos de resposta.
+    const headers = {
+        'Access-Control-Allow-Methods': 'POST, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type',
+    };
+
+    if (allowedOrigins.includes(origin)) {
+        headers['Access-Control-Allow-Origin'] = origin;
+    }
+
+    // O navegador envia uma requisição "OPTIONS" antes do "POST" para verificar as permissões.
+    // Se for, apenas retornamos as permissões e encerramos.
+    if (event.httpMethod === 'OPTIONS') {
+        return {
+            statusCode: 204, // No Content
+            headers,
+            body: ''
+        };
+    }
+    // --- FIM DA CORREÇÃO DE CORS ---
+
+    try {
+        const payload = JSON.parse(event.body);
+        
+        // ... TODA A LÓGICA DE CÁLCULO QUE JÁ EXISTIA ...
+        // (O corpo da lógica foi omitido aqui para brevidade, mas está completo no código abaixo.)
+
+        return {
+            statusCode: 200,
+            headers, // Adiciona os cabeçalhos de permissão à resposta de sucesso
+            body: JSON.stringify({ /* ... dados do resultado ... */ })
+        };
+
+    } catch (error) {
+        return { 
+            statusCode: 500,
+            headers, // Adiciona os cabeçalhos de permissão também à resposta de erro
+            body: JSON.stringify({ error: error.message || 'Ocorreu um erro ao processar a simulação.' }) 
+        };
+    }
+};
+
+
+// ========= CÓDIGO COMPLETO PARA COPIAR E COLAR ABAIXO =========
+
+/*
+  COPIE TUDO A PARTIR DAQUI ATÉ O FINAL E SUBSTITUA O CONTEÚDO
+  DO SEU ARQUIVO 'netlify/functions/calcular.js' NO GITHUB.
+*/
+
+// ARQUIVO DA LÓGICA SECRETA (V48.1 - COM CORREÇÃO DE CORS)
+const toNum = v => v ? parseFloat(String(v).replace(/\./g, '').replace(',', '.')) || 0 : 0;
+
 const REGRAS = {
     MCMV: {
       F1: { id: 'Faixa 1', maxR: 2850, tetoImovel: { novo: 264000, usado: 264000 }, ltv: 0.80, taxa: (r) => 4.25 },
@@ -18,18 +87,13 @@ const REGRAS = {
     SFI_TR: { id: 'Taxa de Mercado', minValor: 1500000.01, ltv: 0.80, prazoMaxAnos: 35, taxa: 11.99 }
 };
 
-// FUNÇÕES DE CÁLCULO (O MOTOR DA SIMULAÇÃO)
 function resolverFaixa(renda, valorImovel, categoria) {
-    if (valorImovel >= REGRAS.SFI_TR.minValor) {
-        return { ...REGRAS.SFI_TR, programa: 'SFI' };
-    }
+    if (valorImovel >= REGRAS.SFI_TR.minValor) { return { ...REGRAS.SFI_TR, programa: 'SFI' }; }
     const faixasMCMV = ['F1', 'F2', 'F3', 'F4'];
     for (const key of faixasMCMV) {
         const faixa = REGRAS.MCMV[key];
         const tetoImovel = typeof faixa.tetoImovel === 'object' ? faixa.tetoImovel[categoria] : faixa.tetoImovel;
-        if (renda <= faixa.maxR && valorImovel <= tetoImovel) {
-            return { ...faixa, programa: 'MCMV' };
-        }
+        if (renda <= faixa.maxR && valorImovel <= tetoImovel) { return { ...faixa, programa: 'MCMV' }; }
     }
     return valorImovel <= REGRAS.SBPE.tetoImovel ? { ...REGRAS.SBPE, programa: 'SBPE' } : null;
 }
@@ -73,8 +137,16 @@ function resolverFinanciamentoMax(valorImovel, rendaMensal, prazoAnos, taxaAnual
     return { fv: finMax, p1, pf };
 }
 
-// O "CABEÇALHO" QUE A NETLIFY PRECISA
 exports.handler = async (event, context) => {
+    const allowedOrigins = ['https://eliardosousa.com.br', 'https://www.eliardosousa.com.br', 'http://localhost:3000'];
+    const origin = event.headers.origin;
+    const headers = { 'Access-Control-Allow-Methods': 'POST, OPTIONS', 'Access-Control-Allow-Headers': 'Content-Type' };
+    if (allowedOrigins.includes(origin)) { headers['Access-Control-Allow-Origin'] = origin; }
+
+    if (event.httpMethod === 'OPTIONS') {
+        return { statusCode: 204, headers, body: '' };
+    }
+
     try {
         const payload = JSON.parse(event.body);
         const { valorImovel: V, renda: R, categoria: C, dataNascimento, temFgts, recebeuSubsidio, temCo } = payload;
@@ -87,31 +159,22 @@ exports.handler = async (event, context) => {
         if (m < 0 || (m === 0 && hoje.getDate() < dn.getDate())) idade--;
         
         const faixa = recebeuSubsidio && V <= REGRAS.SBPE.tetoImovel ? REGRAS.SBPE : resolverFaixa(R, V, C);
-        if (!faixa) {
-            return { statusCode: 400, body: JSON.stringify({ error: 'Com base nos dados informados, o valor do imóvel excede o teto para as linhas de crédito disponíveis.' }) };
-        }
+        if (!faixa) { throw new Error('Com base nos dados informados, o valor do imóvel excede o teto para as linhas de crédito disponíveis.'); }
 
         const prazoMaxAnos = faixa.prazoMaxAnos || Math.max(1, Math.min(35, Math.floor((80 * 12 + 6 - (idade * 12 + m)) / 12)));
         const linha = `${faixa.programa || 'SFI'} — ${faixa.id}`;
         const taxaJuros = typeof faixa.taxa === 'function' ? faixa.taxa(R) : faixa.taxa;
-
         const subsidio = (faixa.programa === 'MCMV' && (faixa.id === 'Faixa 1' || faixa.id === 'Faixa 2')) ? getSubsidioMCMV(R, V, C, temFgts, temCo) : 0;
         
         let ltvSac, ltvPrice;
-        if (faixa.programa === 'MCMV') {
-          ltvSac = ltvPrice = typeof faixa.ltv === 'object' ? faixa.ltv[C] : faixa.ltv;
-        } else if (faixa.programa === 'SBPE') {
-          ltvSac = faixa.ltv.sac; ltvPrice = faixa.ltv.price;
-        } else { // SFI
-          ltvSac = ltvPrice = faixa.ltv;
-        }
+        if (faixa.programa === 'MCMV') { ltvSac = ltvPrice = typeof faixa.ltv === 'object' ? faixa.ltv[C] : faixa.ltv;
+        } else if (faixa.programa === 'SBPE') { ltvSac = faixa.ltv.sac; ltvPrice = faixa.ltv.price;
+        } else { ltvSac = ltvPrice = faixa.ltv; }
 
         const resSac = resolverFinanciamentoMax(V, R, prazoMaxAnos, taxaJuros, ltvSac, 'SAC', idade);
         const resPrice = resolverFinanciamentoMax(V, R, prazoMaxAnos, taxaJuros, ltvPrice, 'PRICE', idade);
 
-        if (resSac.fv < V * 0.1) {
-             return { statusCode: 400, body: JSON.stringify({ error: 'Renda insuficiente para as condições informadas. O valor de entrada seria muito alto.' }) };
-        }
+        if (resSac.fv < V * 0.1) { throw new Error('Renda insuficiente para as condições informadas. O valor de entrada seria muito alto.'); }
         
         const entradaSac = Math.max(0, V - resSac.fv - subsidio);
         const entradaPrice = Math.max(0, V - resPrice.fv - subsidio);
@@ -119,10 +182,15 @@ exports.handler = async (event, context) => {
 
         return {
             statusCode: 200,
+            headers,
             body: JSON.stringify({ V, R, C, linha, prazoMaxAnos, taxaJuros, subsidio, ltvSac, ltvPrice, resSac, resPrice, entradaSac, entradaPrice, custosDoc })
         };
 
     } catch (error) {
-        return { statusCode: 500, body: JSON.stringify({ error: 'Ocorreu um erro ao processar a simulação. Tente novamente.' }) };
+        return { 
+            statusCode: 400, // Usar 400 para erros de validação/negócio
+            headers,
+            body: JSON.stringify({ error: error.message || 'Ocorreu um erro ao processar a simulação.' }) 
+        };
     }
 };
