@@ -1,29 +1,57 @@
 // netlify/functions/simular.js
 exports.handler = async (event) => {
-  // Domínio do SEU site/plataforma (onde roda o HTML do simulador)
-  const allowedOrigin = "https://eliardosousa.com.br";
+  // ---------- CORS ----------
+  const ALLOWED = (process.env.ALLOWED_ORIGINS ||
+    "https://eliardosousa.com.br,https://www.eliardosousa.com.br"
+  ).split(",").map(s => s.trim());
 
-  const origin = event.headers.origin || "";
+  const origin  = event.headers.origin  || "";
   const referer = event.headers.referer || "";
-  const sameSite = origin === allowedOrigin || referer.startsWith(allowedOrigin);
+  const isAllowed = ALLOWED.some(o => origin === o || referer.startsWith(o));
 
   const corsHeaders = {
-    "Access-Control-Allow-Origin": allowedOrigin,
+    "Access-Control-Allow-Origin": isAllowed ? origin : ALLOWED[0],
     "Vary": "Origin",
     "Access-Control-Allow-Methods": "POST, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type"
   };
+
   if (event.httpMethod === "OPTIONS") {
     return { statusCode: 204, headers: corsHeaders, body: "" };
   }
-  if (!sameSite) {
+  if (!isAllowed) {
     return { statusCode: 403, headers: corsHeaders, body: JSON.stringify({ error: "Origin not allowed" }) };
   }
 
-  try {
-    const { valorImovel, rendaMensal, categoria, idadeAnos, flags } = JSON.parse(event.body || "{}");
+  // ---------- Parse Body ----------
+  let body;
+  try { body = JSON.parse(event.body || "{}"); }
+  catch { return { statusCode: 400, headers: corsHeaders, body: JSON.stringify({ error:"JSON inválido" }) }; }
 
-    // === Regras e lógica protegidas no backend ===
+  // ---------- Turnstile (Cloudflare) ----------
+  try {
+    const captchaToken = body.captchaToken || "";
+    if (!captchaToken) {
+      return { statusCode: 400, headers: corsHeaders, body: JSON.stringify({ error: "Captcha ausente" }) };
+    }
+    const secret = process.env.TURNSTILE_SECRET || "";
+    const resp = await fetch("https://challenges.cloudflare.com/turnstile/v0/siteverify", {
+      method: "POST",
+      headers: { "Content-Type":"application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ secret, response: captchaToken })
+    });
+    const verify = await resp.json();
+    if (!verify.success) {
+      return { statusCode: 403, headers: corsHeaders, body: JSON.stringify({ error: "Falha no captcha" }) };
+    }
+  } catch (e) {
+    return { statusCode: 500, headers: corsHeaders, body: JSON.stringify({ error:"Erro ao validar captcha", detail:String(e) }) };
+  }
+
+  // ---------- SUA LÓGICA DE CÁLCULO (protegida) ----------
+  try {
+    const { valorImovel, rendaMensal, categoria, idadeAnos, flags } = body;
+
     const REGRAS = {
       MCMV: {
         F1: { id: 'Faixa 1', maxR: 2850, tetoImovel: { novo: 264000, usado: 264000 }, ltv: 0.80, taxa: () => 4.25 },
@@ -78,7 +106,6 @@ exports.handler = async (event) => {
       return { fv: ok, p1, pf };
     }
 
-    // Inputs
     const V = +valorImovel || 0, R = +rendaMensal || 0, cat = categoria||'novo', idade = +idadeAnos||30;
     const temFgts = !!(flags && flags.fgts), recebeuSub = !!(flags && flags.subsidioRecebido), temCo = !!(flags && flags.co);
     if (!V || !R || !cat) return { statusCode: 400, headers: corsHeaders, body: JSON.stringify({ error:"Dados insuficientes" }) };
@@ -118,6 +145,6 @@ exports.handler = async (event) => {
       })
     };
   } catch (e) {
-    return { statusCode: 500, body: JSON.stringify({ error: "Erro interno", detail: String(e) }) };
+    return { statusCode: 500, headers: corsHeaders, body: JSON.stringify({ error:"Erro interno", detail:String(e) }) };
   }
 };
