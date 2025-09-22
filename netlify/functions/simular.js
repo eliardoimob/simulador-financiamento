@@ -43,7 +43,8 @@ function timeoutSignal(ms = 4000) {
 }
 
 // ====== Turnstile ======
-const TURNSTILE_SECRET_KEY = process.env.TURNSTILE_SECRET_KEY || '';
+const TURNSTILE_SECRET_KEY =
+  process.env.TURNSTILE_SECRET_KEY || process.env.TURNSTILE_SECRET || '';
 
 async function verifyTurnstile(token, ip) {
   if (!TURNSTILE_SECRET_KEY) throw new Error('TURNSTILE_SECRET_KEY ausente');
@@ -52,10 +53,14 @@ async function verifyTurnstile(token, ip) {
   form.set('response', token || '');
   if (ip) form.set('remoteip', ip);
 
-  const resp = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', { method: 'POST', body: form });
+  const resp = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
+    method: 'POST',
+    body: form
+  });
   const data = await resp.json().catch(() => ({}));
   return !!data.success;
 }
+
 
 // ====== CÁLCULO (placeholder alinhado ao front) ======
 function computeSimulation(payload) {
@@ -248,3 +253,4 @@ exports.handler = async (event) => {
 
   return { statusCode: 200, headers: corsHeaders(origin), body: JSON.stringify(result) };
 };
+
