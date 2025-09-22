@@ -7,7 +7,7 @@ const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '')
   .filter(Boolean);
 
 const allowCors = (origin) => {
-  // permite quando Origin vier vazio (same-origin)
+  // tolerante: se o header vier vazio em same-origin, aceita
   if (!origin) return true;
   if (ALLOWED_ORIGINS.length === 0) return true;
   return ALLOWED_ORIGINS.includes(origin);
@@ -35,7 +35,6 @@ function pickUTMs(utmObj) {
   return has ? out : null;
 }
 
-// Timeout helper (não travar resposta)
 function timeoutSignal(ms = 4000) {
   const ctl = new AbortController();
   const id = setTimeout(() => ctl.abort(), ms);
@@ -53,48 +52,94 @@ async function verifyTurnstile(token, ip) {
   form.set('response', token || '');
   if (ip) form.set('remoteip', ip);
 
-  const resp = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
-    method: 'POST',
-    body: form
-  });
+  const resp = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', { method: 'POST', body: form });
   const data = await resp.json().catch(() => ({}));
   return !!data.success;
 }
 
+// ====== Parâmetros do simulador (ajustáveis por ENV) ======
+const TAXA_AA_NOVO  = Number(process.env.SIM_TAXA_AA_NOVO  || process.env.SIM_TAXA_AA || 9.5);
+const TAXA_AA_USADO = Number(process.env.SIM_TAXA_AA_USADO || TAXA_AA_NOVO);
+const PRAZO_MESES   = Math.max(60, Number(process.env.SIM_PRAZO_MESES || 360)); // mínimo 60
+const LTV_NOVO      = Math.min(1, Math.max(0.1, Number(process.env.SIM_LTV_NOVO  || 0.80)));
+const LTV_USADO     = Math.min(1, Math.max(0.1, Number(process.env.SIM_LTV_USADO || 0.80)));
+const RENDA_PCT     = Math.min(1, Math.max(0.1, Number(process.env.SIM_RENDA_PCT || 0.30))); // 30%
 
-// ====== CÁLCULO (placeholder alinhado ao front) ======
+// ====== Fórmulas ======
+const toIm = (aa) => (Number(aa)/100)/12; // i mensal a partir da taxa a.a.
+const round2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
+
+function pricePMT(PV, i, n) {
+  if (i <= 0) return PV / n;
+  return (PV * i) / (1 - Math.pow(1 + i, -n));
+}
+
+function sacFirstLast(PV, i, n) {
+  const amort = PV / n;
+  const p1 = amort + PV * i;             // 1ª = amortização + juros sobre saldo cheio
+  const pf = amort + amort * i;          // última ≈ amortização + juros sobre última parcela
+  return { p1, pf };
+}
+
+// ====== CÁLCULO PRINCIPAL ======
 function computeSimulation(payload) {
-  const { valorImovel = 0, rendaMensal = 0, categoria = 'novo' } = payload;
+  const { valorImovel = 0, rendaMensal = 0, categoria = 'novo', idadeAnos = null } = payload;
 
-  const taxaAnual  = 9.5;
-  const prazoMeses = 360;
-  const subsidio   = payload?.flags?.subsidioRecebido ? 20000 : 0;
-  const ltv        = 0.8;
+  // Taxa e LTV por categoria
+  const taxaAnual = (categoria === 'usado') ? TAXA_AA_USADO : TAXA_AA_NOVO;
+  const ltvAlvo   = (categoria === 'usado') ? LTV_USADO     : LTV_NOVO;
 
-  const entradaBase   = valorImovel * (1 - ltv);
-  const entrada       = Math.max(0, entradaBase - subsidio);
-  const financiamento = Math.max(0, valorImovel - entrada - subsidio);
+  // Prazo: regra comum "idade + prazo <= 80 anos"
+  const prazoMaxIdade = (idadeAnos && idadeAnos > 0) ? Math.max(60, (80 - idadeAnos) * 12) : PRAZO_MESES;
+  const prazoMeses = Math.min(PRAZO_MESES, prazoMaxIdade);
 
-  // SAC
-  const amortizacao = financiamento / prazoMeses;
-  const jurosMes1   = (financiamento * (taxaAnual/100)) / 12;
-  const p1_sac      = Math.round(amortizacao + jurosMes1);
-  const jurosUlt    = ((amortizacao) * (taxaAnual/100)) / 12;
-  const pf_sac      = Math.max(0, Math.round(amortizacao + jurosUlt));
+  // Entrada mínima por LTV alvo
+  const subsidio = 0; // NÃO conceder subsídio automático; só mostrar se existir em outra fonte
+  const entradaMin = Math.max(0, valorImovel * (1 - ltvAlvo) - subsidio);
+  let financiamento = Math.max(0, valorImovel - entradaMin - subsidio);
 
-  // PRICE
-  const i = (taxaAnual/100)/12;
-  const pmt = i > 0 ? Math.round((financiamento * i) / (1 - Math.pow(1 + i, -prazoMeses))) : Math.round(financiamento / prazoMeses);
+  // Ajuste por renda: se PRICE > RENDA_PCT * renda, reduz financiamento (aumenta entrada)
+  const i = toIm(taxaAnual);
+  const parcelaPrice = pricePMT(financiamento, i, prazoMeses);
+  const limiteParcela = rendaMensal > 0 ? rendaMensal * RENDA_PCT : Infinity;
+
+  if (parcelaPrice > limiteParcela && isFinite(limiteParcela)) {
+    // PV permitido pela renda
+    const pvPermitido = limiteParcela * (i > 0 ? (1 - Math.pow(1 + i, -prazoMeses)) / i : prazoMeses);
+    financiamento = Math.max(0, Math.min(financiamento, pvPermitido));
+  }
+
+  const entrada = Math.max(0, valorImovel - financiamento - subsidio);
+  const ltvReal = valorImovel > 0 ? financiamento / valorImovel : 0;
+
+  // PRICE e SAC (com base no financiamento ajustado)
+  const priceParcela = pricePMT(financiamento, i, prazoMeses);
+  const { p1: sacP1, pf: sacPf } = sacFirstLast(financiamento, i, prazoMeses);
 
   return {
     ok: true,
     linha: categoria === 'usado' ? 'Habitação • Imóvel Usado' : 'Habitação • Imóvel Novo',
-    valorImovel, rendaMensal, categoria,
-    idadeAnos: payload.idadeAnos ?? null,
-    flags: payload.flags || {},
-    taxaAnual, prazoMeses, subsidio,
-    sac:  { ltv, entrada, financiamento, p1: p1_sac, pf: pf_sac },
-    price:{ ltv, entrada, financiamento, p1: pmt },
+    categoria,
+    valorImovel: round2(valorImovel),
+    rendaMensal: round2(rendaMensal),
+    taxaAnual: round2(taxaAnual),
+    prazoMeses,
+    subsidio: round2(subsidio),
+
+    sac: {
+      ltv: round2(ltvReal),
+      entrada: round2(entrada),
+      financiamento: round2(financiamento),
+      p1: round2(sacP1),
+      pf: round2(sacPf),
+    },
+
+    price: {
+      ltv: round2(ltvReal),
+      entrada: round2(entrada),
+      financiamento: round2(financiamento),
+      p1: round2(priceParcela),
+    },
   };
 }
 
@@ -125,10 +170,11 @@ async function trelloFetch(path, params = {}, method = 'POST', signal) {
   }
 }
 
+// ====== Handler ======
 exports.handler = async (event) => {
   const origin = event.headers?.origin || event.headers?.Origin || '';
 
-  // Healthcheck simples
+  // Healthcheck GET ?healthz=1 (opcional)
   if (event.httpMethod === 'GET' && event.queryStringParameters?.healthz === '1') {
     try {
       if (!TRELLO_KEY || !TRELLO_TOKEN || !TRELLO_LIST_ID) {
@@ -136,8 +182,7 @@ exports.handler = async (event) => {
           ok:false, reason:'Missing env', hasKey:!!TRELLO_KEY, hasToken:!!TRELLO_TOKEN, hasList:!!TRELLO_LIST_ID
         })};
       }
-      const r = await trelloFetch(`lists/${TRELLO_LIST_ID}`, {}, 'GET');
-      return { statusCode: 200, headers: corsHeaders(origin), body: JSON.stringify({ ok:true, list:{ id:r.id, name:r.name } }) };
+      return { statusCode: 200, headers: corsHeaders(origin), body: JSON.stringify({ ok:true }) };
     } catch (e) {
       return { statusCode: 502, headers: corsHeaders(origin), body: JSON.stringify({ ok:false, reason:String(e) }) };
     }
@@ -173,18 +218,17 @@ exports.handler = async (event) => {
   }
 
   // Cálculo
-  const simulationPayload = { valorImovel, rendaMensal, categoria, idadeAnos, flags };
-  const result = computeSimulation(simulationPayload);
+  const result = computeSimulation({ valorImovel, rendaMensal, categoria, idadeAnos, flags });
 
-  // 🔒 Trello — em background
+  // 🔒 Trello em background (igual ao seu)
   (async () => {
     try {
       if (!TRELLO_LIST_ID) throw new Error('TRELLO_LIST_ID ausente');
 
+      const utms = pickUTMs(utm);
       const nomeCliente = safe(contato.nome) || 'Sem nome';
       const titulo = `Simulação • ${nomeCliente} • ${BRL(valorImovel)} • ${safe(categoria)}`;
 
-      const utms = pickUTMs(utm);
       const dadosCliente = [
         `**Nome:** ${safe(contato.nome) || '-'}`,
         `**E-mail:** ${safe(contato.email) || '-'}`,
@@ -216,7 +260,6 @@ exports.handler = async (event) => {
       const desc = [`## Dados do cliente`, dadosCliente, '', `## Resumo técnico`, resumoTecnico].join('\n');
 
       const { signal, cancel } = timeoutSignal(4000);
-
       const card = await trelloFetch('cards', {
         idList: TRELLO_LIST_ID,
         name: titulo,
@@ -228,9 +271,8 @@ exports.handler = async (event) => {
 
       console.log({ cardId: card?.id, nome: nomeCliente, valorImovel });
 
-      // anexa JSON (opcional)
       try {
-        const jsonData = { contato, origem, utm: utms || null, input: simulationPayload, output: result, createdAt: new Date().toISOString() };
+        const jsonData = { contato, origem, utm: utms || null, input: { valorImovel, rendaMensal, categoria, idadeAnos, flags }, output: result, createdAt: new Date().toISOString() };
         const dataUrl = 'data:application/json;base64,' + Buffer.from(JSON.stringify(jsonData, null, 2)).toString('base64');
         await trelloFetch(`cards/${card.id}/attachments`, { url: dataUrl, name: `simulacao-${Date.now()}.json` }, 'POST', signal);
       } catch (annexErr) {
@@ -253,4 +295,3 @@ exports.handler = async (event) => {
 
   return { statusCode: 200, headers: corsHeaders(origin), body: JSON.stringify(result) };
 };
-
