@@ -7,13 +7,14 @@ const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '')
   .filter(Boolean);
 
 const allowCors = (origin) => {
-  if (!origin) return false;
+  // ⚠️ ajuste: permitir quando Origin vier vazio (same-origin)
+  if (!origin) return true;
   if (ALLOWED_ORIGINS.length === 0) return true;
   return ALLOWED_ORIGINS.includes(origin);
 };
 
 const corsHeaders = (origin) => ({
-  'Access-Control-Allow-Origin': origin,
+  'Access-Control-Allow-Origin': origin || '*',
   'Access-Control-Allow-Credentials': 'true',
   'Access-Control-Allow-Headers': 'Content-Type, Authorization',
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
@@ -31,11 +32,8 @@ function parseJSON(body) {
 function pickUTMs(utmObj) {
   if (!utmObj || typeof utmObj !== 'object') return null;
   const keys = ['utm_source','utm_medium','utm_campaign','utm_term','utm_content'];
-  const out = {};
-  let has = false;
-  for (const k of keys) {
-    if (utmObj[k]) { out[k] = utmObj[k]; has = true; }
-  }
+  const out = {}; let has = false;
+  for (const k of keys) if (utmObj[k]) { out[k] = utmObj[k]; has = true; }
   return has ? out : null;
 }
 
@@ -56,41 +54,34 @@ async function verifyTurnstile(token, ip) {
   form.set('response', token || '');
   if (ip) form.set('remoteip', ip);
 
-  const resp = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
-    method: 'POST',
-    body: form
-  });
+  const resp = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', { method: 'POST', body: form });
   const data = await resp.json().catch(() => ({}));
   return !!data.success;
 }
 
-// ====== CÁLCULO (exemplo — troque pela sua lógica real) ======
+// ====== CÁLCULO (placeholder — mantenho o seu formato) ======
 function computeSimulation(payload) {
-  // >>>>> SUBSTITUA por seu cálculo real, mantendo as chaves esperadas no front <<<<<
   const { valorImovel = 0, rendaMensal = 0, categoria = 'novo' } = payload;
 
-  // Exemplo ilustrativo:
-  const taxaAnual  = 9.5;       // % a.a.
-  const prazoMeses = 360;       // meses
+  const taxaAnual  = 9.5;
+  const prazoMeses = 360;
   const subsidio   = payload?.flags?.subsidioRecebido ? 20000 : 0;
   const ltv        = 0.8;
 
-  const entradaBase    = valorImovel * (1 - ltv);
-  const entrada        = Math.max(0, entradaBase - subsidio);
-  const financiamento  = Math.max(0, valorImovel - entrada - subsidio);
+  const entradaBase   = valorImovel * (1 - ltv);
+  const entrada       = Math.max(0, entradaBase - subsidio);
+  const financiamento = Math.max(0, valorImovel - entrada - subsidio);
 
-  // SAC (aproximações)
+  // SAC
   const amortizacao = financiamento / prazoMeses;
   const jurosMes1   = (financiamento * (taxaAnual/100)) / 12;
   const p1_sac      = Math.round(amortizacao + jurosMes1);
   const jurosUlt    = ((amortizacao) * (taxaAnual/100)) / 12;
   const pf_sac      = Math.max(0, Math.round(amortizacao + jurosUlt));
 
-  // PRICE (PMT)
+  // PRICE
   const i = (taxaAnual/100)/12;
-  const pmt = i > 0
-    ? Math.round((financiamento * i) / (1 - Math.pow(1 + i, -prazoMeses)))
-    : Math.round(financiamento / prazoMeses);
+  const pmt = i > 0 ? Math.round((financiamento * i) / (1 - Math.pow(1 + i, -prazoMeses))) : Math.round(financiamento / prazoMeses);
 
   return {
     ok: true,
@@ -108,14 +99,13 @@ function computeSimulation(payload) {
   };
 }
 
-// ====== 🔒 Trello: variáveis e helper ======
+// ====== 🔒 Trello ======
 const TRELLO_KEY        = process.env.TRELLO_KEY || '';
 const TRELLO_TOKEN      = process.env.TRELLO_TOKEN || '';
 const TRELLO_LIST_ID    = process.env.TRELLO_LIST_ID || '';
 const TRELLO_LABEL_IDS  = (process.env.TRELLO_LABEL_IDS  || '').split(',').map(s => s.trim()).filter(Boolean);
 const TRELLO_MEMBER_IDS = (process.env.TRELLO_MEMBER_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
 
-// 🔒 Trello: faz chamadas assinadas (key/token) e com timeout
 async function trelloFetch(path, params = {}, method = 'POST', signal) {
   if (!TRELLO_KEY || !TRELLO_TOKEN) throw new Error('TRELLO_KEY/TRELLO_TOKEN ausentes');
   const url = new URL(`https://api.trello.com/1/${path}`);
@@ -123,67 +113,71 @@ async function trelloFetch(path, params = {}, method = 'POST', signal) {
   url.searchParams.set('token', TRELLO_TOKEN);
 
   if (method === 'GET') {
-    for (const [k, v] of Object.entries(params || {})) {
-      if (v != null) url.searchParams.set(k, v);
-    }
+    for (const [k, v] of Object.entries(params || {})) if (v != null) url.searchParams.set(k, v);
     const resp = await fetch(url.toString(), { method, signal });
     if (!resp.ok) throw new Error(await resp.text());
     return await resp.json();
   } else {
     const body = new URLSearchParams();
-    for (const [k, v] of Object.entries(params || {})) {
-      if (v != null) body.append(k, v);
-    }
+    for (const [k, v] of Object.entries(params || {})) if (v != null) body.append(k, v);
     const resp = await fetch(url.toString(), { method, body, signal });
     if (!resp.ok) throw new Error(await resp.text());
     return await resp.json();
   }
 }
 
-// ====== Handler Netlify Function ======
 exports.handler = async (event) => {
   const origin = event.headers?.origin || event.headers?.Origin || '';
+
+  // Healthcheck simples: GET ?healthz=1
+  if (event.httpMethod === 'GET' && event.queryStringParameters?.healthz === '1') {
+    try {
+      if (!TRELLO_KEY || !TRELLO_TOKEN || !TRELLO_LIST_ID) {
+        return { statusCode: 500, headers: corsHeaders(origin), body: JSON.stringify({
+          ok:false, reason:'Missing env', hasKey:!!TRELLO_KEY, hasToken:!!TRELLO_TOKEN, hasList:!!TRELLO_LIST_ID
+        })};
+      }
+      const r = await trelloFetch(`lists/${TRELLO_LIST_ID}`, {}, 'GET');
+      return { statusCode: 200, headers: corsHeaders(origin), body: JSON.stringify({ ok:true, list:{ id:r.id, name:r.name } }) };
+    } catch (e) {
+      return { statusCode: 502, headers: corsHeaders(origin), body: JSON.stringify({ ok:false, reason:String(e) }) };
+    }
+  }
+
   if (event.httpMethod === 'OPTIONS') {
     return { statusCode: 200, headers: corsHeaders(origin), body: '' };
   }
   if (!allowCors(origin)) {
-    return { statusCode: 403, body: 'Origin not allowed' };
+    return { statusCode: 403, headers: corsHeaders(origin), body: 'Origin not allowed' };
   }
   if (event.httpMethod !== 'POST') {
-    return { statusCode: 405, headers: corsHeaders(origin), body: 'Method Not Allowed' };
+    return { statusCode: 405, headers: { ...corsHeaders(origin), Allow: 'POST' }, body: 'Method Not Allowed' };
   }
 
   const body = parseJSON(event.body || '{}');
-  if (!body) {
-    return { statusCode: 400, headers: corsHeaders(origin), body: 'Invalid JSON' };
-  }
+  if (!body) return { statusCode: 400, headers: corsHeaders(origin), body: 'Invalid JSON' };
 
-  // Campos esperados do front
   const {
     valorImovel, rendaMensal, categoria, idadeAnos, flags,
     captchaToken,
-    contato = {}, // {nome,email,whatsapp}
-    origem = '',
-    utm = null,
+    contato = {}, origem = '', utm = null,
   } = body;
 
   // Turnstile
   try {
     const ip = event.headers['x-nf-client-connection-ip'] || event.headers['x-real-ip'] || event.headers['client-ip'] || '';
     const ok = await verifyTurnstile(captchaToken, ip);
-    if (!ok) {
-      return { statusCode: 403, headers: corsHeaders(origin), body: 'captcha inválido' };
-    }
+    if (!ok) return { statusCode: 403, headers: corsHeaders(origin), body: 'captcha inválido' };
   } catch (err) {
     console.warn('Turnstile error:', err?.message || err);
     return { statusCode: 500, headers: corsHeaders(origin), body: 'Erro ao validar captcha' };
   }
 
-  // Cálculo da simulação
+  // Cálculo
   const simulationPayload = { valorImovel, rendaMensal, categoria, idadeAnos, flags };
   const result = computeSimulation(simulationPayload);
 
-  // 🔒 Trello — rodar em background sem bloquear resposta
+  // 🔒 Trello — em background
   (async () => {
     try {
       if (!TRELLO_LIST_ID) throw new Error('TRELLO_LIST_ID ausente');
@@ -191,7 +185,6 @@ exports.handler = async (event) => {
       const nomeCliente = safe(contato.nome) || 'Sem nome';
       const titulo = `Simulação • ${nomeCliente} • ${BRL(valorImovel)} • ${safe(categoria)}`;
 
-      // Descrição Markdown
       const utms = pickUTMs(utm);
       const dadosCliente = [
         `**Nome:** ${safe(contato.nome) || '-'}`,
@@ -221,18 +214,10 @@ exports.handler = async (event) => {
         `- Parcela: ${BRL(result.price?.p1)}`,
       ].join('\n');
 
-      const desc = [
-        `## Dados do cliente`,
-        dadosCliente,
-        '',
-        `## Resumo técnico`,
-        resumoTecnico,
-      ].join('\n');
+      const desc = [`## Dados do cliente`, dadosCliente, '', `## Resumo técnico`, resumoTecnico].join('\n');
 
-      // Timeout curto para não travar
       const { signal, cancel } = timeoutSignal(4000);
 
-      // 🔒 Trello: cria card
       const card = await trelloFetch('cards', {
         idList: TRELLO_LIST_ID,
         name: titulo,
@@ -242,33 +227,20 @@ exports.handler = async (event) => {
         idMembers: TRELLO_MEMBER_IDS.join(',') || undefined,
       }, 'POST', signal);
 
-      // Logs úteis para depurar no Netlify
       console.log({ cardId: card?.id, nome: nomeCliente, valorImovel });
 
-      // 🔒 Trello: anexa JSON da simulação (opcional)
+      // anexa JSON (opcional)
       try {
-        const jsonData = {
-          contato, origem, utm: utms || null,
-          input: simulationPayload,
-          output: result,
-          createdAt: new Date().toISOString(),
-        };
+        const jsonData = { contato, origem, utm: utms || null, input: simulationPayload, output: result, createdAt: new Date().toISOString() };
         const dataUrl = 'data:application/json;base64,' + Buffer.from(JSON.stringify(jsonData, null, 2)).toString('base64');
-        await trelloFetch(`cards/${card.id}/attachments`, {
-          url: dataUrl,
-          name: `simulacao-${Date.now()}.json`
-        }, 'POST', signal);
+        await trelloFetch(`cards/${card.id}/attachments`, { url: dataUrl, name: `simulacao-${Date.now()}.json` }, 'POST', signal);
       } catch (annexErr) {
         console.warn('Trello anexar JSON falhou:', annexErr?.message || annexErr);
       }
 
-      // 🔒 Trello: anexa a URL de origem (se houver)
       if (origem) {
         try {
-          await trelloFetch(`cards/${card.id}/attachments`, {
-            url: origem,
-            name: 'Origem da simulação'
-          }, 'POST', signal);
+          await trelloFetch(`cards/${card.id}/attachments`, { url: origem, name: 'Origem da simulação' }, 'POST', signal);
         } catch (annexUrlErr) {
           console.warn('Trello anexar origem falhou:', annexUrlErr?.message || annexUrlErr);
         }
@@ -276,15 +248,9 @@ exports.handler = async (event) => {
 
       cancel();
     } catch (err) {
-      // Não bloquear o usuário — só loga
       console.warn('Trello falhou:', err?.message || err);
     }
   })();
 
-  // Resposta ao usuário (sempre o JSON da simulação)
-  return {
-    statusCode: 200,
-    headers: corsHeaders(origin),
-    body: JSON.stringify(result),
-  };
+  return { statusCode: 200, headers: corsHeaders(origin), body: JSON.stringify(result) };
 };
