@@ -1,150 +1,290 @@
 // netlify/functions/simular.js
-exports.handler = async (event) => {
-  // ---------- CORS ----------
-  const ALLOWED = (process.env.ALLOWED_ORIGINS ||
-    "https://eliardosousa.com.br,https://www.eliardosousa.com.br"
-  ).split(",").map(s => s.trim());
 
-  const origin  = event.headers.origin  || "";
-  const referer = event.headers.referer || "";
-  const isAllowed = ALLOWED.some(o => origin === o || referer.startsWith(o));
+// ====== CORS/Config ======
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '')
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean);
 
-  const corsHeaders = {
-    "Access-Control-Allow-Origin": isAllowed ? origin : ALLOWED[0],
-    "Vary": "Origin",
-    "Access-Control-Allow-Methods": "POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type"
+const allowCors = (origin) => {
+  if (!origin) return false;
+  if (ALLOWED_ORIGINS.length === 0) return true;
+  return ALLOWED_ORIGINS.includes(origin);
+};
+
+const corsHeaders = (origin) => ({
+  'Access-Control-Allow-Origin': origin,
+  'Access-Control-Allow-Credentials': 'true',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+  'Access-Control-Allow-Methods': 'POST, OPTIONS',
+});
+
+// ====== Utils ======
+const BRL = (n) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(Number(n) || 0);
+const pct = (n) => `${(Number(n) || 0).toFixed(2).replace('.', ',')}%`;
+const safe = (s) => (s ?? '').toString().trim();
+
+function parseJSON(body) {
+  try { return JSON.parse(body); } catch { return null; }
+}
+
+function pickUTMs(utmObj) {
+  if (!utmObj || typeof utmObj !== 'object') return null;
+  const keys = ['utm_source','utm_medium','utm_campaign','utm_term','utm_content'];
+  const out = {};
+  let has = false;
+  for (const k of keys) {
+    if (utmObj[k]) { out[k] = utmObj[k]; has = true; }
+  }
+  return has ? out : null;
+}
+
+// Timeout helper (não travar resposta)
+function timeoutSignal(ms = 4000) {
+  const ctl = new AbortController();
+  const id = setTimeout(() => ctl.abort(), ms);
+  return { signal: ctl.signal, cancel: () => clearTimeout(id) };
+}
+
+// ====== Turnstile ======
+const TURNSTILE_SECRET_KEY = process.env.TURNSTILE_SECRET_KEY || '';
+
+async function verifyTurnstile(token, ip) {
+  if (!TURNSTILE_SECRET_KEY) throw new Error('TURNSTILE_SECRET_KEY ausente');
+  const form = new URLSearchParams();
+  form.set('secret', TURNSTILE_SECRET_KEY);
+  form.set('response', token || '');
+  if (ip) form.set('remoteip', ip);
+
+  const resp = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
+    method: 'POST',
+    body: form
+  });
+  const data = await resp.json().catch(() => ({}));
+  return !!data.success;
+}
+
+// ====== CÁLCULO (exemplo — troque pela sua lógica real) ======
+function computeSimulation(payload) {
+  // >>>>> SUBSTITUA por seu cálculo real, mantendo as chaves esperadas no front <<<<<
+  const { valorImovel = 0, rendaMensal = 0, categoria = 'novo' } = payload;
+
+  // Exemplo ilustrativo:
+  const taxaAnual  = 9.5;       // % a.a.
+  const prazoMeses = 360;       // meses
+  const subsidio   = payload?.flags?.subsidioRecebido ? 20000 : 0;
+  const ltv        = 0.8;
+
+  const entradaBase    = valorImovel * (1 - ltv);
+  const entrada        = Math.max(0, entradaBase - subsidio);
+  const financiamento  = Math.max(0, valorImovel - entrada - subsidio);
+
+  // SAC (aproximações)
+  const amortizacao = financiamento / prazoMeses;
+  const jurosMes1   = (financiamento * (taxaAnual/100)) / 12;
+  const p1_sac      = Math.round(amortizacao + jurosMes1);
+  const jurosUlt    = ((amortizacao) * (taxaAnual/100)) / 12;
+  const pf_sac      = Math.max(0, Math.round(amortizacao + jurosUlt));
+
+  // PRICE (PMT)
+  const i = (taxaAnual/100)/12;
+  const pmt = i > 0
+    ? Math.round((financiamento * i) / (1 - Math.pow(1 + i, -prazoMeses)))
+    : Math.round(financiamento / prazoMeses);
+
+  return {
+    ok: true,
+    linha: categoria === 'usado' ? 'Habitação • Imóvel Usado' : 'Habitação • Imóvel Novo',
+    valorImovel,
+    rendaMensal,
+    categoria,
+    idadeAnos: payload.idadeAnos ?? null,
+    flags: payload.flags || {},
+    taxaAnual,
+    prazoMeses,
+    subsidio,
+    sac:  { ltv, entrada, financiamento, p1: p1_sac, pf: pf_sac },
+    price:{ ltv, entrada, financiamento, p1: pmt },
   };
+}
 
-  if (event.httpMethod === "OPTIONS") {
-    return { statusCode: 204, headers: corsHeaders, body: "" };
-  }
-  if (!isAllowed) {
-    return { statusCode: 403, headers: corsHeaders, body: JSON.stringify({ error: "Origin not allowed" }) };
-  }
+// ====== 🔒 Trello: variáveis e helper ======
+const TRELLO_KEY        = process.env.TRELLO_KEY || '';
+const TRELLO_TOKEN      = process.env.TRELLO_TOKEN || '';
+const TRELLO_LIST_ID    = process.env.TRELLO_LIST_ID || '';
+const TRELLO_LABEL_IDS  = (process.env.TRELLO_LABEL_IDS  || '').split(',').map(s => s.trim()).filter(Boolean);
+const TRELLO_MEMBER_IDS = (process.env.TRELLO_MEMBER_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
 
-  // ---------- Parse Body ----------
-  let body;
-  try { body = JSON.parse(event.body || "{}"); }
-  catch { return { statusCode: 400, headers: corsHeaders, body: JSON.stringify({ error:"JSON inválido" }) }; }
+// 🔒 Trello: faz chamadas assinadas (key/token) e com timeout
+async function trelloFetch(path, params = {}, method = 'POST', signal) {
+  if (!TRELLO_KEY || !TRELLO_TOKEN) throw new Error('TRELLO_KEY/TRELLO_TOKEN ausentes');
+  const url = new URL(`https://api.trello.com/1/${path}`);
+  url.searchParams.set('key', TRELLO_KEY);
+  url.searchParams.set('token', TRELLO_TOKEN);
 
-  // ---------- Turnstile (Cloudflare) ----------
-  try {
-    const captchaToken = body.captchaToken || "";
-    if (!captchaToken) {
-      return { statusCode: 400, headers: corsHeaders, body: JSON.stringify({ error: "Captcha ausente" }) };
+  if (method === 'GET') {
+    for (const [k, v] of Object.entries(params || {})) {
+      if (v != null) url.searchParams.set(k, v);
     }
-    const secret = process.env.TURNSTILE_SECRET || "";
-    const resp = await fetch("https://challenges.cloudflare.com/turnstile/v0/siteverify", {
-      method: "POST",
-      headers: { "Content-Type":"application/x-www-form-urlencoded" },
-      body: new URLSearchParams({ secret, response: captchaToken })
-    });
-    const verify = await resp.json();
-    if (!verify.success) {
-      return { statusCode: 403, headers: corsHeaders, body: JSON.stringify({ error: "Falha no captcha" }) };
+    const resp = await fetch(url.toString(), { method, signal });
+    if (!resp.ok) throw new Error(await resp.text());
+    return await resp.json();
+  } else {
+    const body = new URLSearchParams();
+    for (const [k, v] of Object.entries(params || {})) {
+      if (v != null) body.append(k, v);
     }
-  } catch (e) {
-    return { statusCode: 500, headers: corsHeaders, body: JSON.stringify({ error:"Erro ao validar captcha", detail:String(e) }) };
+    const resp = await fetch(url.toString(), { method, body, signal });
+    if (!resp.ok) throw new Error(await resp.text());
+    return await resp.json();
+  }
+}
+
+// ====== Handler Netlify Function ======
+exports.handler = async (event) => {
+  const origin = event.headers?.origin || event.headers?.Origin || '';
+  if (event.httpMethod === 'OPTIONS') {
+    return { statusCode: 200, headers: corsHeaders(origin), body: '' };
+  }
+  if (!allowCors(origin)) {
+    return { statusCode: 403, body: 'Origin not allowed' };
+  }
+  if (event.httpMethod !== 'POST') {
+    return { statusCode: 405, headers: corsHeaders(origin), body: 'Method Not Allowed' };
   }
 
-  // ---------- SUA LÓGICA DE CÁLCULO (protegida) ----------
+  const body = parseJSON(event.body || '{}');
+  if (!body) {
+    return { statusCode: 400, headers: corsHeaders(origin), body: 'Invalid JSON' };
+  }
+
+  // Campos esperados do front
+  const {
+    valorImovel, rendaMensal, categoria, idadeAnos, flags,
+    captchaToken,
+    contato = {}, // {nome,email,whatsapp}
+    origem = '',
+    utm = null,
+  } = body;
+
+  // Turnstile
   try {
-    const { valorImovel, rendaMensal, categoria, idadeAnos, flags } = body;
+    const ip = event.headers['x-nf-client-connection-ip'] || event.headers['x-real-ip'] || event.headers['client-ip'] || '';
+    const ok = await verifyTurnstile(captchaToken, ip);
+    if (!ok) {
+      return { statusCode: 403, headers: corsHeaders(origin), body: 'captcha inválido' };
+    }
+  } catch (err) {
+    console.warn('Turnstile error:', err?.message || err);
+    return { statusCode: 500, headers: corsHeaders(origin), body: 'Erro ao validar captcha' };
+  }
 
-    const REGRAS = {
-      MCMV: {
-        F1: { id: 'Faixa 1', maxR: 2850, tetoImovel: { novo: 264000, usado: 264000 }, ltv: 0.80, taxa: () => 4.25 },
-        F2: { id: 'Faixa 2', maxR: 4700, tetoImovel: { novo: 264000, usado: 264000 }, ltv: 0.80, taxa: (r) => (r<=3200?5:r<=4000?6:6.5) },
-        F3: { id: 'Faixa 3', maxR: 8600, tetoImovel: { novo: 350000, usado: 270000 }, ltv: { novo: 0.80, usado: 0.65 }, taxa: () => 7.66 },
-        F4: { id: 'Classe Média', maxR: 12000, tetoImovel: { novo: 500000, usado: 500000 }, ltv: { novo: 0.80, usado: 0.60 }, taxa: () => 10.00 }
-      },
-      SBPE:  { id: 'SBPE', maxR: Infinity, tetoImovel: 1500000, ltv: { sac: 0.70, price: 0.50 }, taxa: 10.99 },
-      SFI_TR:{ id: 'Taxa de Mercado', minValor: 1500000.01, ltv: 0.80, prazoMaxAnos: 35, taxa: 11.99 }
-    };
+  // Cálculo da simulação
+  const simulationPayload = { valorImovel, rendaMensal, categoria, idadeAnos, flags };
+  const result = computeSimulation(simulationPayload);
 
-    function resolverFaixa(renda, V, cat) {
-      if (V >= REGRAS.SFI_TR.minValor) return { ...REGRAS.SFI_TR, programa: 'SFI' };
-      for (const key of ['F1','F2','F3','F4']) {
-        const f = REGRAS.MCMV[key];
-        const teto = typeof f.tetoImovel === 'object' ? f.tetoImovel[cat] : f.tetoImovel;
-        if (renda <= f.maxR && V <= teto) return { ...f, programa: 'MCMV' };
+  // 🔒 Trello — rodar em background sem bloquear resposta
+  (async () => {
+    try {
+      if (!TRELLO_LIST_ID) throw new Error('TRELLO_LIST_ID ausente');
+
+      const nomeCliente = safe(contato.nome) || 'Sem nome';
+      const titulo = `Simulação • ${nomeCliente} • ${BRL(valorImovel)} • ${safe(categoria)}`;
+
+      // Descrição Markdown
+      const utms = pickUTMs(utm);
+      const dadosCliente = [
+        `**Nome:** ${safe(contato.nome) || '-'}`,
+        `**E-mail:** ${safe(contato.email) || '-'}`,
+        `**WhatsApp:** ${safe(contato.whatsapp) || '-'}`,
+        `**Origem:** ${safe(origem) || '-'}`,
+        utms ? `**UTM:** ${Object.entries(utms).map(([k,v])=>`${k}=${v}`).join(' | ')}` : null,
+      ].filter(Boolean).join('\n');
+
+      const resumoTecnico = [
+        `**Linha/Programa:** ${safe(result.linha || result.categoria)}`,
+        `**Taxa anual:** ${pct(result.taxaAnual)}`,
+        `**Prazo:** ${result.prazoMeses} meses`,
+        `**Subsídio:** ${BRL(result.subsidio)}`,
+        '',
+        `**SAC**`,
+        `- LTV: ${(result.sac?.ltv*100 || 0).toFixed(0)}%`,
+        `- Entrada: ${BRL(result.sac?.entrada)}`,
+        `- Financiamento: ${BRL(result.sac?.financiamento)}`,
+        `- Parcela 1: ${BRL(result.sac?.p1)}`,
+        `- Parcela final: ${BRL(result.sac?.pf)}`,
+        '',
+        `**PRICE**`,
+        `- LTV: ${(result.price?.ltv*100 || 0).toFixed(0)}%`,
+        `- Entrada: ${BRL(result.price?.entrada)}`,
+        `- Financiamento: ${BRL(result.price?.financiamento)}`,
+        `- Parcela: ${BRL(result.price?.p1)}`,
+      ].join('\n');
+
+      const desc = [
+        `## Dados do cliente`,
+        dadosCliente,
+        '',
+        `## Resumo técnico`,
+        resumoTecnico,
+      ].join('\n');
+
+      // Timeout curto para não travar
+      const { signal, cancel } = timeoutSignal(4000);
+
+      // 🔒 Trello: cria card
+      const card = await trelloFetch('cards', {
+        idList: TRELLO_LIST_ID,
+        name: titulo,
+        desc,
+        pos: 'top',
+        idLabels: TRELLO_LABEL_IDS.join(',') || undefined,
+        idMembers: TRELLO_MEMBER_IDS.join(',') || undefined,
+      }, 'POST', signal);
+
+      // Logs úteis para depurar no Netlify
+      console.log({ cardId: card?.id, nome: nomeCliente, valorImovel });
+
+      // 🔒 Trello: anexa JSON da simulação (opcional)
+      try {
+        const jsonData = {
+          contato, origem, utm: utms || null,
+          input: simulationPayload,
+          output: result,
+          createdAt: new Date().toISOString(),
+        };
+        const dataUrl = 'data:application/json;base64,' + Buffer.from(JSON.stringify(jsonData, null, 2)).toString('base64');
+        await trelloFetch(`cards/${card.id}/attachments`, {
+          url: dataUrl,
+          name: `simulacao-${Date.now()}.json`
+        }, 'POST', signal);
+      } catch (annexErr) {
+        console.warn('Trello anexar JSON falhou:', annexErr?.message || annexErr);
       }
-      return V <= REGRAS.SBPE.tetoImovel ? { ...REGRAS.SBPE, programa: 'SBPE' } : null;
-    }
 
-    function getSubsidioMCMV(renda, V, cat, temFgts, temCo) {
-      if (!temFgts || renda > 4400) return 0;
-      let s, teto = 55000;
-      if (renda <= 2850) {
-        const r1=1500, s1=14850, r2=2850, s2=4845;
-        const m=(s2-s1)/(r2-r1); s = s1 + m*(renda-r1);
-      } else {
-        const p=[{r:2850,s:4845},{r:3000,s:2135},{r:4700,s:0}];
-        if (renda >= p[2].r) s=0; else {
-          const [a,b] = renda <= p[1].r ? [p[0],p[1]] : [p[1],p[2]];
-          const m=(b.s-a.s)/(b.r-a.r); s = a.s + m*(renda-a.r);
+      // 🔒 Trello: anexa a URL de origem (se houver)
+      if (origem) {
+        try {
+          await trelloFetch(`cards/${card.id}/attachments`, {
+            url: origem,
+            name: 'Origem da simulação'
+          }, 'POST', signal);
+        } catch (annexUrlErr) {
+          console.warn('Trello anexar origem falhou:', annexUrlErr?.message || annexUrlErr);
         }
       }
-      let out = Math.min(s, teto);
-      if (cat==='usado') out *= 0.5;
-      return Math.max(0, Math.floor(out));
+
+      cancel();
+    } catch (err) {
+      // Não bloquear o usuário — só loga
+      console.warn('Trello falhou:', err?.message || err);
     }
+  })();
 
-    const pricePMT = (PV,i,n) => PV * (i * Math.pow(1+i,n)) / (Math.pow(1+i,n)-1);
-
-    function solveMax(V, R, prazoAnos, taxaAnual, ltv, sistema, idade){
-      const n = prazoAnos*12, i=(taxaAnual/100)/12, limite=R*0.30;
-      const TAXA_ADMIN=25, DFI=0.000138, MIP0=0.000038, mip = MIP0 * (1 + (idade-20)*0.05);
-      const fixo = TAXA_ADMIN + V*DFI;
-      let lo=0, hi=V*ltv, ok=0, p1=0, pf=0;
-      for(let k=0;k<50;k++){
-        const mid=(lo+hi)/2, varEnc=mid*mip, enc=fixo+varEnc;
-        const base = sistema==='SAC' ? (mid/n)+(mid*i) : pricePMT(mid,i,n);
-        if (base+enc <= limite){ ok=mid; p1=base+enc; pf = sistema==='SAC' ? (mid/n)+(mid/n*i)+enc : p1; lo=mid; } else hi=mid;
-      }
-      return { fv: ok, p1, pf };
-    }
-
-    const V = +valorImovel || 0, R = +rendaMensal || 0, cat = categoria||'novo', idade = +idadeAnos||30;
-    const temFgts = !!(flags && flags.fgts), recebeuSub = !!(flags && flags.subsidioRecebido), temCo = !!(flags && flags.co);
-    if (!V || !R || !cat) return { statusCode: 400, headers: corsHeaders, body: JSON.stringify({ error:"Dados insuficientes" }) };
-
-    const faixa = (recebeuSub && V<=1500000) ? { ...REGRAS.SBPE, programa:'SBPE' } : resolverFaixa(R,V,cat);
-    if (!faixa) return { statusCode: 200, headers: corsHeaders, body: JSON.stringify({ erroRegra:"Acima do teto disponível" }) };
-
-    const prazoAnos = faixa.prazoMaxAnos || Math.max(1, Math.min(35, 80 - idade));
-    const taxa = typeof faixa.taxa==='function' ? faixa.taxa(R) : faixa.taxa;
-
-    const subsidio = (faixa.programa==='MCMV' && (faixa.id==='Faixa 1'||faixa.id==='Faixa 2'))
-      ? getSubsidioMCMV(R, V, cat, temFgts, temCo) : 0;
-
-    let ltvSac, ltvPrice;
-    if (faixa.programa==='MCMV'){ ltvSac=ltvPrice = typeof faixa.ltv==='object'?faixa.ltv[cat]:faixa.ltv; }
-    else if (faixa.programa==='SBPE'){ ltvSac=faixa.ltv.sac; ltvPrice=faixa.ltv.price; }
-    else { ltvSac=ltvPrice=faixa.ltv; }
-
-    const sac   = solveMax(V,R,prazoAnos,taxa,ltvSac,'SAC',idade);
-    const price = solveMax(V,R,prazoAnos,taxa,ltvPrice,'PRICE',idade);
-
-    const entradaSac   = Math.max(0, V - sac.fv   - subsidio);
-    const entradaPrice = Math.max(0, V - price.fv - subsidio);
-    const custosDoc = V * 0.045;
-
-    return {
-      statusCode: 200,
-      headers: { ...corsHeaders, "Content-Type":"application/json" },
-      body: JSON.stringify({
-        linha: `${faixa.programa || 'SFI'} — ${faixa.id}`,
-        prazoMeses: prazoAnos*12,
-        taxaAnual: taxa,
-        subsidio,
-        sac:   { ltv: ltvSac,   entrada: entradaSac,   financiamento: sac.fv,   p1: sac.p1,   pf: sac.pf },
-        price: { ltv: ltvPrice, entrada: entradaPrice, financiamento: price.fv, p1: price.p1 },
-        custosDoc
-      })
-    };
-  } catch (e) {
-    return { statusCode: 500, headers: corsHeaders, body: JSON.stringify({ error:"Erro interno", detail:String(e) }) };
-  }
+  // Resposta ao usuário (sempre o JSON da simulação)
+  return {
+    statusCode: 200,
+    headers: corsHeaders(origin),
+    body: JSON.stringify(result),
+  };
 };
