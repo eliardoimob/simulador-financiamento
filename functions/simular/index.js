@@ -1,4 +1,4 @@
-// functions/simular/index.js (V50.1 - Cloudflare Pages)
+// functions/simular/index.js — Cloudflare Pages
 
 // --- REGRAS & CÁLCULOS ---
 const REGRAS = {
@@ -168,7 +168,7 @@ export async function onRequestPost(context) {
   const allowedOrigins = [
     "https://eliardosousa.com.br",
     "https://www.eliardosousa.com.br",
-    "https://1d6c9c4-simulador-financiamento.pages.dev"
+    "https://f2c63d72.simulador-financiamento.pages.dev"
   ];
 
   if (!allowedOrigins.includes(origin)) {
