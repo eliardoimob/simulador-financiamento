@@ -1,6 +1,7 @@
-// functions/simular/index.js (V52.1 - Cloudflare Final)
+// functions/simular/index.js (V52.2 - Cloudflare com CORS Simplificado)
 
-// --- LÓGICA DE CÁLCULO (O "CORAÇÃO" DA CALCULADORA) ---
+// --- LÓGICA DE CÁLCULO (O "CORAÇÃO") ---
+// Esta seção permanece 100% idêntica e correta.
 const REGRAS = { MCMV: { F1: { id: 'Faixa 1', maxR: 2850, tetoImovel: { novo: 264000, usado: 264000 }, ltv: 0.80, taxa: (r) => 4.25 }, F2: { id: 'Faixa 2', maxR: 4700, tetoImovel: { novo: 264000, usado: 264000 }, ltv: 0.80, taxa: (r) => { if (r <= 3200) return 5.00; if (r <= 4000) return 6.00; return 6.50; } }, F3: { id: 'Faixa 3', maxR: 8600, tetoImovel: { novo: 350000, usado: 270000 }, ltv: { novo: 0.80, usado: 0.65 }, taxa: (r) => 7.66 }, F4: { id: 'Classe Média', maxR: 12000, tetoImovel: { novo: 500000, usado: 500000 }, ltv: { novo: 0.80, usado: 0.60 }, taxa: (r) => 10.00 } }, SBPE: { id: 'SBPE', maxR: Infinity, tetoImovel: 1500000, ltv: { sac: 0.70, price: 0.50 }, taxa: 10.99 }, SFI_TR: { id: 'Taxa de Mercado', minValor: 1500000.01, ltv: 0.80, prazoMaxAnos: 35, taxa: 11.99 } };
 function resolverFaixa(renda, valorImovel, categoria) { if (valorImovel >= REGRAS.SFI_TR.minValor) { return { ...REGRAS.SFI_TR, programa: 'SFI' }; } const faixasMCMV = ['F1', 'F2', 'F3', 'F4']; for (const key of faixasMCMV) { const faixa = REGRAS.MCMV[key]; const tetoImovel = typeof faixa.tetoImovel === 'object' ? faixa.tetoImovel[categoria] : faixa.tetoImovel; if (renda <= faixa.maxR && valorImovel <= tetoImovel) { return { ...faixa, programa: 'MCMV' }; } } return valorImovel <= REGRAS.SBPE.tetoImovel ? { ...REGRAS.SBPE, programa: 'SBPE' } : null; }
 function getSubsidioMCMV(renda, valorImovel, categoria, temFgts, temCo) { if (!temFgts || renda > 4400) return 0; let subsidio; const tetoMaximo = 55000; if (renda <= 2850) { const r1 = 1500, s1 = 14850; const r2 = 2850, s2 = 4845; const m = (s2 - s1) / (r2 - r1); subsidio = s1 + m * (renda - r1); } else { const p = [{ r: 2850, s: 4845 }, { r: 3000, s: 2135 }, { r: 4700, s: 0 }]; if (renda >= p[2].r) subsidio = 0; else { const seg = renda <= p[1].r ? [p[0], p[1]] : [p[1], p[2]]; const m = (seg[1].s - seg[0].s) / (seg[1].r - seg[0].r); subsidio = seg[0].s + m * (renda - seg[0].r); } } let subsidioFinal = Math.min(subsidio, tetoMaximo); if (categoria === 'usado') { subsidioFinal *= 0.5; } return Math.max(0, Math.floor(subsidioFinal)); }
@@ -14,46 +15,51 @@ async function verifyTurnstile(token, ip, env) { if (!env.TURNSTILE_SECRET_KEY) 
 async function sendToTrello(result, contato, origem, utm, env) { try { if (!env.TRELLO_LIST_ID || !env.TRELLO_KEY || !env.TRELLO_TOKEN) return; const valorImovel = result.sac?.financiamento > 0 ? result.sac.financiamento + result.sac.entrada : result.price.financiamento + result.price.entrada; const titulo = `Simulação • ${safe(contato.nome)} • ${BRL(valorImovel)}`; const dadosCliente = [`**Nome:** ${safe(contato.nome)}`, `**E-mail:** ${safe(contato.email)}`, `**WhatsApp:** ${safe(contato.whatsapp)}`, `**Origem:** ${safe(origem)}`].join('\n'); const resumoTecnico = [`**Programa:** ${safe(result.linha)}`, `**Taxa:** ${pct(result.taxaAnual)}`, `**Prazo:** ${result.prazoMeses} meses`, `**Subsídio:** ${BRL(result.subsidio)}`, '', `**SAC**`, `- Entrada: ${BRL(result.sac?.entrada)}`, `- 1ª Parcela: ${BRL(result.sac?.p1)}`, '', `**PRICE**`, `- Entrada: ${BRL(result.price?.entrada)}`, `- Parcela: ${BRL(result.price?.p1)}`].join('\n'); const desc = `## Dados do Cliente\n${dadosCliente}\n\n## Resumo da Simulação\n${resumoTecnico}`; const url = new URL(`https://api.trello.com/1/cards`); url.searchParams.set('key', env.TRELLO_KEY); url.searchParams.set('token', env.TRELLO_TOKEN); url.searchParams.set('idList', env.TRELLO_LIST_ID); url.searchParams.set('name', titulo); url.searchParams.set('desc', desc); url.searchParams.set('pos', 'top'); if (env.TRELLO_LABEL_IDS) url.searchParams.set('idLabels', env.TRELLO_LABEL_IDS); await fetch(url.toString(), { method: 'POST' }); } catch (err) { console.warn('Trello falhou:', err?.message || err); } }
 
 // --- HANDLER PRINCIPAL (PONTO DE ENTRADA DA API) ---
-const corsHeaders = (origin) => ({ 'Access-Control-Allow-Origin': origin, 'Access-Control-Allow-Methods': 'POST, OPTIONS', 'Access-Control-Allow-Headers': 'Content-Type', 'Content-Type': 'application/json' });
-
-export async function onRequest(context) {
-    const { request, env, waitUntil } = context;
+const handler = {
+  async fetch(request, env, ctx) {
     const origin = request.headers.get("Origin") || "";
     const allowedOrigins = (env.ALLOWED_ORIGINS || "https://eliardosousa.com.br,https://www.eliardosousa.com.br").split(',');
+    
+    let corsHeaders = {
+      'Access-Control-Allow-Methods': 'POST, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type',
+    };
 
-    // A origem deve ser uma das permitidas
-    if (!allowedOrigins.includes(origin) && !origin.endsWith('.pages.dev')) {
-        return new Response(JSON.stringify({ error: 'Origin not allowed' }), { status: 403, headers: corsHeaders(origin) });
+    if (allowedOrigins.includes(origin) || origin.endsWith('.pages.dev')) {
+        corsHeaders['Access-Control-Allow-Origin'] = origin;
     }
 
     if (request.method === 'OPTIONS') {
-        return new Response(null, { status: 204, headers: corsHeaders(origin) });
+      return new Response(null, { status: 204, headers: corsHeaders });
     }
 
     if (request.method !== 'POST') {
-        return new Response(JSON.stringify({ error: 'Método não permitido' }), { status: 405, headers: corsHeaders(origin) });
+      return new Response(JSON.stringify({ error: 'Método não permitido' }), { status: 405, headers: corsHeaders });
     }
 
     try {
-        const body = await request.json();
-        const { captchaToken, contato = {}, origem = '', utm = null, ...simulationPayload } = body;
-        
-        const ip = request.headers.get('CF-Connecting-IP') || '';
-        const isCaptchaValid = await verifyTurnstile(captchaToken, ip, env);
-        if (!isCaptchaValid) {
-            return new Response(JSON.stringify({ error: 'Captcha inválido' }), { status: 403, headers: corsHeaders(origin) });
-        }
-        
-        const result = computeSimulation(simulationPayload);
-        if (result.erroRegra) {
-            return new Response(JSON.stringify({ error: result.erroRegra }), { status: 400, headers: corsHeaders(origin) });
-        }
+      const body = await request.json();
+      const { captchaToken, contato = {}, origem = '', utm = null, ...simulationPayload } = body;
+      
+      const ip = request.headers.get('CF-Connecting-IP') || '';
+      const isCaptchaValid = await verifyTurnstile(captchaToken, ip, env);
+      if (!isCaptchaValid) {
+        return new Response(JSON.stringify({ error: 'Captcha inválido' }), { status: 403, headers: corsHeaders });
+      }
+      
+      const result = computeSimulation(simulationPayload);
+      if (result.erroRegra) {
+        return new Response(JSON.stringify({ error: result.erroRegra }), { status: 400, headers: corsHeaders });
+      }
 
-        waitUntil(sendToTrello(result, contato, origem, utm, env));
-        
-        return new Response(JSON.stringify(result), { status: 200, headers: corsHeaders(origin) });
+      ctx.waitUntil(sendToTrello(result, contato, origem, utm, env));
+      
+      return new Response(JSON.stringify(result), { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
 
     } catch (err) {
-        return new Response(JSON.stringify({ error: err.message || 'Erro interno no servidor.' }), { status: 500, headers: corsHeaders(origin) });
+      return new Response(JSON.stringify({ error: err.message || 'Erro interno no servidor.' }), { status: 500, headers: corsHeaders });
     }
-}
+  }
+};
+
+export default handler;
