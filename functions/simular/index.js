@@ -1,6 +1,5 @@
-// functions/simular/index.js (V52.3 — Cloudflare Pages Functions)
+// /functions/simular/index.js — Cloudflare Pages Functions (onRequest*)
 
-// --- LÓGICA DE CÁLCULO (O "CORAÇÃO") ---
 const REGRAS = {
   MCMV: {
     F1: { id: 'Faixa 1', maxR: 2850, tetoImovel: { novo: 264000, usado: 264000 }, ltv: 0.80, taxa: (r) => 4.25 },
@@ -13,24 +12,19 @@ const REGRAS = {
 };
 
 function resolverFaixa(renda, valorImovel, categoria) {
-  if (valorImovel >= REGRAS.SFI_TR.minValor) {
-    return { ...REGRAS.SFI_TR, programa: 'SFI' };
-  }
-  const faixasMCMV = ['F1', 'F2', 'F3', 'F4'];
-  for (const key of faixasMCMV) {
+  if (valorImovel >= REGRAS.SFI_TR.minValor) return { ...REGRAS.SFI_TR, programa: 'SFI' };
+  for (const key of ['F1', 'F2', 'F3', 'F4']) {
     const faixa = REGRAS.MCMV[key];
-    const tetoImovel = typeof faixa.tetoImovel === 'object' ? faixa.tetoImovel[categoria] : faixa.tetoImovel;
-    if (renda <= faixa.maxR && valorImovel <= tetoImovel) {
-      return { ...faixa, programa: 'MCMV' };
-    }
+    const teto = typeof faixa.tetoImovel === 'object' ? faixa.tetoImovel[categoria] : faixa.tetoImovel;
+    if (renda <= faixa.maxR && valorImovel <= teto) return { ...faixa, programa: 'MCMV' };
   }
-  return valorImovel <= REGRAS.SBPE.tetoImovel ? { ...REGRAS.SBPE, programa: 'SBPE' } : null;
+  return (valorImovel <= REGRAS.SBPE.tetoImovel) ? { ...REGRAS.SBPE, programa: 'SBPE' } : null;
 }
 
 function getSubsidioMCMV(renda, valorImovel, categoria, temFgts, temCo) {
   if (!temFgts || renda > 4400) return 0;
-  let subsidio;
   const tetoMaximo = 55000;
+  let subsidio;
 
   if (renda <= 2850) {
     const r1 = 1500, s1 = 14850;
@@ -47,9 +41,9 @@ function getSubsidioMCMV(renda, valorImovel, categoria, temFgts, temCo) {
     }
   }
 
-  let subsidioFinal = Math.min(subsidio, tetoMaximo);
-  if (categoria === 'usado') subsidioFinal *= 0.5;
-  return Math.max(0, Math.floor(subsidioFinal));
+  let out = Math.min(subsidio, tetoMaximo);
+  if (categoria === 'usado') out *= 0.5;
+  return Math.max(0, Math.floor(out));
 }
 
 const pricePMT = (PV, i, n) => PV * (i * Math.pow(1 + i, n)) / (Math.pow(1 + i, n) - 1);
@@ -88,32 +82,28 @@ function solveMax(V, R, prazoAnos, taxaAnual, ltv, sistema, idade) {
 function computeSimulation(payload) {
   const { valorImovel: V, rendaMensal: R, categoria: cat, idadeAnos: idade, flags } = payload;
   const { fgts: temFgts, subsidioRecebido: recebeuSub, co: temCo } = flags;
-
   if (!V || !R || !cat) throw new Error("Dados insuficientes");
 
-  const faixa = (recebeuSub && V <= 1500000) ? { ...REGRAS.SBPE, programa: 'SBPE' }
-                                             : resolverFaixa(R, V, cat);
+  const faixa = (recebeuSub && V <= 1500000) ? { ...REGRAS.SBPE, programa: 'SBPE' } : resolverFaixa(R, V, cat);
   if (!faixa) return { erroRegra: "Valor acima do teto" };
 
   const prazoAnos = faixa.prazoMaxAnos || Math.max(1, Math.min(35, 80 - idade));
   const taxa = typeof faixa.taxa === 'function' ? faixa.taxa(R) : faixa.taxa;
 
-  const subsidio = (faixa.programa === 'MCMV' && (faixa.id === 'Faixa 1' || faixa.id === 'Faixa 2'))
-    ? getSubsidioMCMV(R, V, cat, temFgts, temCo)
-    : 0;
-
   let ltvSac, ltvPrice;
   if (faixa.programa === 'MCMV') {
     ltvSac = ltvPrice = typeof faixa.ltv === 'object' ? faixa.ltv[cat] : faixa.ltv;
   } else if (faixa.programa === 'SBPE') {
-    ltvSac = faixa.ltv.sac;
-    ltvPrice = faixa.ltv.price;
+    ltvSac = faixa.ltv.sac; ltvPrice = faixa.ltv.price;
   } else {
     ltvSac = ltvPrice = faixa.ltv;
   }
 
   const sac = solveMax(V, R, prazoAnos, taxa, ltvSac, 'SAC', idade);
   const price = solveMax(V, R, prazoAnos, taxa, ltvPrice, 'PRICE', idade);
+
+  const subsidio = (faixa.programa === 'MCMV' && (faixa.id === 'Faixa 1' || faixa.id === 'Faixa 2'))
+    ? getSubsidioMCMV(R, V, cat, temFgts, temCo) : 0;
 
   const entradaSac = Math.max(0, V - sac.fv - subsidio);
   const entradaPrice = Math.max(0, V - price.fv - subsidio);
@@ -130,13 +120,24 @@ function computeSimulation(payload) {
   };
 }
 
-// --- INTEGRAÇÕES (TRELLO, CAPTCHA, CORS) ---
-const BRL = (n) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(Number(n) || 0);
-const pct = (n) => `${(Number(n) || 0).toFixed(2).replace('.', ',')}%`;
-const safe = (s) => (s ?? '').toString().trim();
+// ---------- CORS helpers ----------
+function makeCorsHeaders(origin, env) {
+  const allowed = (env.ALLOWED_ORIGINS || "https://eliardosousa.com.br,https://www.eliardosousa.com.br")
+    .split(',').map(s => s.trim()).filter(Boolean);
+  const headers = {
+    'Access-Control-Allow-Methods': 'POST, OPTIONS, GET',
+    'Access-Control-Allow-Headers': 'Content-Type',
+    'Vary': 'Origin'
+  };
+  if (allowed.includes(origin) || (origin && origin.endsWith('.pages.dev'))) {
+    headers['Access-Control-Allow-Origin'] = origin;
+  }
+  return headers;
+}
 
+// ---------- Turnstile ----------
 async function verifyTurnstile(token, ip, env) {
-  if (!env.TURNSTILE_SECRET_KEY) throw new Error('TURNSTILE_SECRET_KEY ausente');
+  if (!env.TURNSTILE_SECRET_KEY) return true; // se não configurar, não bloqueia
   const form = new URLSearchParams();
   form.set('secret', env.TURNSTILE_SECRET_KEY);
   form.set('response', token || '');
@@ -146,119 +147,99 @@ async function verifyTurnstile(token, ip, env) {
   return !!data.success;
 }
 
+// ---------- Trello (opcional) ----------
+const BRL = (n) => new Intl.NumberFormat('pt-BR',{style:'currency',currency:'BRL'}).format(Number(n)||0);
+const pct = (n) => `${(Number(n)||0).toFixed(2).replace('.', ',')}%`;
+const safe = (s) => (s ?? '').toString().trim();
+
 async function sendToTrello(result, contato, origem, utm, env) {
   try {
     if (!env.TRELLO_LIST_ID || !env.TRELLO_KEY || !env.TRELLO_TOKEN) return;
-
-    const valorImovel = result.sac?.financiamento > 0
-      ? result.sac.financiamento + result.sac.entrada
-      : result.price.financiamento + result.price.entrada;
-
+    const valorImovel = (result.sac?.financiamento || 0) + (result.sac?.entrada || 0) || (result.price?.financiamento || 0) + (result.price?.entrada || 0);
     const titulo = `Simulação • ${safe(contato.nome)} • ${BRL(valorImovel)}`;
-    const dadosCliente = [
+    const desc = [
+      `## Cliente`,
       `**Nome:** ${safe(contato.nome)}`,
       `**E-mail:** ${safe(contato.email)}`,
       `**WhatsApp:** ${safe(contato.whatsapp)}`,
-      `**Origem:** ${safe(origem)}`
-    ].join('\n');
-
-    const resumoTecnico = [
+      `**Origem:** ${safe(origem)}`,
+      '',
+      `## Resumo`,
       `**Programa:** ${safe(result.linha)}`,
       `**Taxa:** ${pct(result.taxaAnual)}`,
       `**Prazo:** ${result.prazoMeses} meses`,
       `**Subsídio:** ${BRL(result.subsidio)}`,
       '',
-      `**SAC**`,
-      `- Entrada: ${BRL(result.sac?.entrada)}`,
-      `- 1ª Parcela: ${BRL(result.sac?.p1)}`,
-      '',
-      `**PRICE**`,
-      `- Entrada: ${BRL(result.price?.entrada)}`,
-      `- Parcela: ${BRL(result.price?.p1)}`
+      `**SAC** — Entrada: ${BRL(result.sac?.entrada)} | 1ª: ${BRL(result.sac?.p1)}`,
+      `**PRICE** — Entrada: ${BRL(result.price?.entrada)} | Parcela: ${BRL(result.price?.p1)}`
     ].join('\n');
 
-    const desc = `## Dados do Cliente\n${dadosCliente}\n\n## Resumo da Simulação\n${resumoTecnico}`;
-
-    const url = new URL(`https://api.trello.com/1/cards`);
-    url.searchParams.set('key',   env.TRELLO_KEY);
+    const url = new URL('https://api.trello.com/1/cards');
+    url.searchParams.set('key', env.TRELLO_KEY);
     url.searchParams.set('token', env.TRELLO_TOKEN);
     url.searchParams.set('idList', env.TRELLO_LIST_ID);
-    url.searchParams.set('name',  titulo);
-    url.searchParams.set('desc',  desc);
-    url.searchParams.set('pos',  'top');
+    url.searchParams.set('name', titulo);
+    url.searchParams.set('desc', desc);
+    url.searchParams.set('pos', 'top');
     if (env.TRELLO_LABEL_IDS) url.searchParams.set('idLabels', env.TRELLO_LABEL_IDS);
-
     await fetch(url.toString(), { method: 'POST' });
-  } catch (err) {
-    console.warn('Trello falhou:', err?.message || err);
-  }
+  } catch {}
 }
 
-// --- HANDLER PRINCIPAL (PONTO DE ENTRADA DA API) ---
-const handler = {
-  async fetch(request, env, ctx) {
-    const origin = request.headers.get("Origin") || "";
-    const allowedOrigins = (env.ALLOWED_ORIGINS || "https://eliardosousa.com.br,https://www.eliardosousa.com.br").split(',');
+// ---------- HANDLERS PAGES FUNCTIONS ----------
 
-    let corsHeaders = {
-      'Access-Control-Allow-Methods': 'POST, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type',
-      'Vary': 'Origin'
-    };
+// GET: só pra teste rápido no navegador
+export async function onRequestGet({ request, env }) {
+  const cors = makeCorsHeaders(request.headers.get('Origin') || '', env);
+  return new Response(JSON.stringify({ ok: true, hint: 'Use POST para simular.' }), {
+    status: 200,
+    headers: { ...cors, 'Content-Type': 'application/json' }
+  });
+}
 
-    if (allowedOrigins.includes(origin) || origin.endsWith('.pages.dev')) {
-      corsHeaders['Access-Control-Allow-Origin'] = origin;
+// OPTIONS: preflight CORS
+export async function onRequestOptions({ request, env }) {
+  const cors = makeCorsHeaders(request.headers.get('Origin') || '', env);
+  return new Response(null, { status: 204, headers: cors });
+}
+
+// POST: simulação
+export async function onRequestPost({ request, env, context }) {
+  const origin = request.headers.get('Origin') || '';
+  const cors = makeCorsHeaders(origin, env);
+
+  try {
+    const body = await request.json();
+
+    const {
+      captchaToken,
+      contato = {},
+      origem = '',
+      utm = null,
+      valorImovel,
+      rendaMensal,
+      categoria,
+      idadeAnos,
+      flags = {}
+    } = body;
+
+    const ip = request.headers.get('CF-Connecting-IP') || '';
+    const captchaOK = await verifyTurnstile(captchaToken, ip, env);
+    if (!captchaOK) {
+      return new Response(JSON.stringify({ error: 'Captcha inválido' }), { status: 403, headers: { ...cors, 'Content-Type': 'application/json' } });
     }
 
-    if (request.method === 'OPTIONS') {
-      return new Response(null, { status: 204, headers: corsHeaders });
+    const payload = { valorImovel, rendaMensal, categoria, idadeAnos, flags };
+    const result = computeSimulation(payload);
+    if (result.erroRegra) {
+      return new Response(JSON.stringify({ error: result.erroRegra }), { status: 400, headers: { ...cors, 'Content-Type': 'application/json' } });
     }
 
-    if (request.method !== 'POST') {
-      return new Response(JSON.stringify({ error: 'Método não permitido' }), { status: 405, headers: corsHeaders });
-    }
+    // envia Trello em background
+    context.waitUntil(sendToTrello(result, contato, origem, utm, env));
 
-    try {
-      const body = await request.json();
-
-      // O front envia no nível raiz (conforme página dedicada)
-      const {
-        captchaToken,
-        contato = {},
-        origem = '',
-        utm = null,
-        valorImovel,
-        rendaMensal,
-        categoria,
-        idadeAnos,
-        flags = {}
-      } = body;
-
-      // Captcha
-      const ip = request.headers.get('CF-Connecting-IP') || '';
-      const isCaptchaValid = await verifyTurnstile(captchaToken, ip, env);
-      if (!isCaptchaValid) {
-        return new Response(JSON.stringify({ error: 'Captcha inválido' }), { status: 403, headers: corsHeaders });
-      }
-
-      // Monta o payload usado pela calculadora
-      const simulationPayload = { valorImovel, rendaMensal, categoria, idadeAnos, flags };
-
-      const result = computeSimulation(simulationPayload);
-      if (result.erroRegra) {
-        return new Response(JSON.stringify({ error: result.erroRegra }), { status: 400, headers: corsHeaders });
-      }
-
-      ctx.waitUntil(sendToTrello(result, contato, origem, utm, env));
-
-      return new Response(JSON.stringify(result), {
-        status: 200,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-      });
-    } catch (err) {
-      return new Response(JSON.stringify({ error: err.message || 'Erro interno no servidor.' }), { status: 500, headers: corsHeaders });
-    }
+    return new Response(JSON.stringify(result), { status: 200, headers: { ...cors, 'Content-Type': 'application/json' } });
+  } catch (err) {
+    return new Response(JSON.stringify({ error: err?.message || 'Erro interno' }), { status: 500, headers: { ...cors, 'Content-Type': 'application/json' } });
   }
-};
-
-export default handler;
+}
