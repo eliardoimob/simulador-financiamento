@@ -7,7 +7,7 @@ const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '')
   .filter(Boolean);
 
 const allowCors = (origin) => {
-  // ⚠️ ajuste: permitir quando Origin vier vazio (same-origin)
+  // permite quando Origin vier vazio (same-origin)
   if (!origin) return true;
   if (ALLOWED_ORIGINS.length === 0) return true;
   return ALLOWED_ORIGINS.includes(origin);
@@ -25,9 +25,7 @@ const BRL = (n) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency:
 const pct = (n) => `${(Number(n) || 0).toFixed(2).replace('.', ',')}%`;
 const safe = (s) => (s ?? '').toString().trim();
 
-function parseJSON(body) {
-  try { return JSON.parse(body); } catch { return null; }
-}
+function parseJSON(body) { try { return JSON.parse(body); } catch { return null; } }
 
 function pickUTMs(utmObj) {
   if (!utmObj || typeof utmObj !== 'object') return null;
@@ -59,7 +57,7 @@ async function verifyTurnstile(token, ip) {
   return !!data.success;
 }
 
-// ====== CÁLCULO (placeholder — mantenho o seu formato) ======
+// ====== CÁLCULO (placeholder alinhado ao front) ======
 function computeSimulation(payload) {
   const { valorImovel = 0, rendaMensal = 0, categoria = 'novo' } = payload;
 
@@ -86,14 +84,10 @@ function computeSimulation(payload) {
   return {
     ok: true,
     linha: categoria === 'usado' ? 'Habitação • Imóvel Usado' : 'Habitação • Imóvel Novo',
-    valorImovel,
-    rendaMensal,
-    categoria,
+    valorImovel, rendaMensal, categoria,
     idadeAnos: payload.idadeAnos ?? null,
     flags: payload.flags || {},
-    taxaAnual,
-    prazoMeses,
-    subsidio,
+    taxaAnual, prazoMeses, subsidio,
     sac:  { ltv, entrada, financiamento, p1: p1_sac, pf: pf_sac },
     price:{ ltv, entrada, financiamento, p1: pmt },
   };
@@ -129,7 +123,7 @@ async function trelloFetch(path, params = {}, method = 'POST', signal) {
 exports.handler = async (event) => {
   const origin = event.headers?.origin || event.headers?.Origin || '';
 
-  // Healthcheck simples: GET ?healthz=1
+  // Healthcheck simples
   if (event.httpMethod === 'GET' && event.queryStringParameters?.healthz === '1') {
     try {
       if (!TRELLO_KEY || !TRELLO_TOKEN || !TRELLO_LIST_ID) {
