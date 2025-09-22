@@ -1,27 +1,24 @@
 [build]
-  # mantenha seu build command se tiver; aqui só garantimos o caminho das functions
   command = ""
   publish = "."
 
-# onde estão as functions
 [functions]
   directory = "netlify/functions"
   node_bundler = "esbuild"
 
-# 🔒 PRIORIDADE: deixar as rotas de function passarem direto (antes do catch-all)
+# Mapear /api/* -> Functions (OK usar /.netlify no "to")
 [[redirects]]
-  from = "/.netlify/functions/*"
+  from = "/api/*"
   to = "/.netlify/functions/:splat"
   status = 200
-  force = true
 
-# atalho opcional (compatível com o que você já tinha)
+# (Opcional) atalho direto só para /api/simular
 [[redirects]]
   from = "/api/simular"
   to = "/.netlify/functions/simular"
   status = 200
 
-# SPA catch-all (se seu site usa roteamento no front)
+# SPA catch-all (fica por ÚLTIMO)
 [[redirects]]
   from = "/*"
   to = "/index.html"
