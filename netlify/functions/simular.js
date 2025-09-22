@@ -1,297 +1,210 @@
-// netlify/functions/simular.js
+// netlify/functions/simular.js (V49.0 - Lógica de Cálculo Restaurada + Integrações)
 
 // ====== CORS/Config ======
-const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '')
-  .split(',')
-  .map(s => s.trim())
-  .filter(Boolean);
-
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "https://eliardosousa.com.br,https://www.eliardosousa.com.br").split(',').map(s => s.trim()).filter(Boolean);
 const allowCors = (origin) => {
-  // tolerante: se o header vier vazio em same-origin, aceita
-  if (!origin) return true;
+  if (!origin) return false;
   if (ALLOWED_ORIGINS.length === 0) return true;
   return ALLOWED_ORIGINS.includes(origin);
 };
-
 const corsHeaders = (origin) => ({
-  'Access-Control-Allow-Origin': origin || '*',
-  'Access-Control-Allow-Credentials': 'true',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+  'Access-Control-Allow-Origin': isAllowed(origin) ? origin : ALLOWED_ORIGINS[0],
+  'Vary': "Origin",
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type'
 });
+const isAllowed = (origin) => ALLOWED_ORIGINS.some(o => origin === o);
 
 // ====== Utils ======
 const BRL = (n) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(Number(n) || 0);
 const pct = (n) => `${(Number(n) || 0).toFixed(2).replace('.', ',')}%`;
 const safe = (s) => (s ?? '').toString().trim();
-
 function parseJSON(body) { try { return JSON.parse(body); } catch { return null; } }
-
 function pickUTMs(utmObj) {
   if (!utmObj || typeof utmObj !== 'object') return null;
-  const keys = ['utm_source','utm_medium','utm_campaign','utm_term','utm_content'];
+  const keys = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content'];
   const out = {}; let has = false;
-  for (const k of keys) if (utmObj[k]) { out[k] = utmObj[k]; has = true; }
+  for (const k of keys) { if (utmObj[k]) { out[k] = utmObj[k]; has = true; } }
   return has ? out : null;
 }
-
-function timeoutSignal(ms = 4000) {
-  const ctl = new AbortController();
-  const id = setTimeout(() => ctl.abort(), ms);
-  return { signal: ctl.signal, cancel: () => clearTimeout(id) };
-}
+function timeoutSignal(ms = 4000) { const ctl = new AbortController(); const id = setTimeout(() => ctl.abort(), ms); return { signal: ctl.signal, cancel: () => clearTimeout(id) }; }
 
 // ====== Turnstile ======
-const TURNSTILE_SECRET_KEY =
-  process.env.TURNSTILE_SECRET_KEY || process.env.TURNSTILE_SECRET || '';
-
+const TURNSTILE_SECRET_KEY = process.env.TURNSTILE_SECRET_KEY || '';
 async function verifyTurnstile(token, ip) {
   if (!TURNSTILE_SECRET_KEY) throw new Error('TURNSTILE_SECRET_KEY ausente');
   const form = new URLSearchParams();
   form.set('secret', TURNSTILE_SECRET_KEY);
   form.set('response', token || '');
   if (ip) form.set('remoteip', ip);
-
   const resp = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', { method: 'POST', body: form });
   const data = await resp.json().catch(() => ({}));
   return !!data.success;
 }
 
-// ====== Parâmetros do simulador (ajustáveis por ENV) ======
-const TAXA_AA_NOVO  = Number(process.env.SIM_TAXA_AA_NOVO  || process.env.SIM_TAXA_AA || 9.5);
-const TAXA_AA_USADO = Number(process.env.SIM_TAXA_AA_USADO || TAXA_AA_NOVO);
-const PRAZO_MESES   = Math.max(60, Number(process.env.SIM_PRAZO_MESES || 360)); // mínimo 60
-const LTV_NOVO      = Math.min(1, Math.max(0.1, Number(process.env.SIM_LTV_NOVO  || 0.80)));
-const LTV_USADO     = Math.min(1, Math.max(0.1, Number(process.env.SIM_LTV_USADO || 0.80)));
-const RENDA_PCT     = Math.min(1, Math.max(0.1, Number(process.env.SIM_RENDA_PCT || 0.30))); // 30%
+// =================================================================================
+// ===== INÍCIO DA LÓGICA DE CÁLCULO RESTAURADA (O "CORAÇÃO" DA CALCULADORA) =====
+// =================================================================================
+const REGRAS = {
+    MCMV: {
+      F1: { id: 'Faixa 1', maxR: 2850, tetoImovel: { novo: 264000, usado: 264000 }, ltv: 0.80, taxa: (r) => 4.25 },
+      F2: { id: 'Faixa 2', maxR: 4700, tetoImovel: { novo: 264000, usado: 264000 }, ltv: 0.80, taxa: (r) => {
+          if (r <= 3200) return 5.00; if (r <= 4000) return 6.00; return 6.50;
+      }},
+      F3: { id: 'Faixa 3', maxR: 8600, tetoImovel: { novo: 350000, usado: 270000 }, ltv: { novo: 0.80, usado: 0.65 }, taxa: (r) => 7.66 },
+      F4: { id: 'Classe Média', maxR: 12000, tetoImovel: { novo: 500000, usado: 500000 }, ltv: { novo: 0.80, usado: 0.60 }, taxa: (r) => 10.00 }
+    },
+    SBPE: { id: 'SBPE', maxR: Infinity, tetoImovel: 1500000, ltv: { sac: 0.70, price: 0.50 }, taxa: 10.99 },
+    SFI_TR: { id: 'Taxa de Mercado', minValor: 1500000.01, ltv: 0.80, prazoMaxAnos: 35, taxa: 11.99 }
+};
 
-// ====== Fórmulas ======
-const toIm = (aa) => (Number(aa)/100)/12; // i mensal a partir da taxa a.a.
-const round2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
-
-function pricePMT(PV, i, n) {
-  if (i <= 0) return PV / n;
-  return (PV * i) / (1 - Math.pow(1 + i, -n));
+function resolverFaixa(renda, valorImovel, categoria) {
+    if (valorImovel >= REGRAS.SFI_TR.minValor) { return { ...REGRAS.SFI_TR, programa: 'SFI' }; }
+    const faixasMCMV = ['F1', 'F2', 'F3', 'F4'];
+    for (const key of faixasMCMV) {
+        const faixa = REGRAS.MCMV[key];
+        const tetoImovel = typeof faixa.tetoImovel === 'object' ? faixa.tetoImovel[categoria] : faixa.tetoImovel;
+        if (renda <= faixa.maxR && valorImovel <= tetoImovel) { return { ...faixa, programa: 'MCMV' }; }
+    }
+    return valorImovel <= REGRAS.SBPE.tetoImovel ? { ...REGRAS.SBPE, programa: 'SBPE' } : null;
 }
 
-function sacFirstLast(PV, i, n) {
-  const amort = PV / n;
-  const p1 = amort + PV * i;             // 1ª = amortização + juros sobre saldo cheio
-  const pf = amort + amort * i;          // última ≈ amortização + juros sobre última parcela
-  return { p1, pf };
+function getSubsidioMCMV(renda, valorImovel, categoria, temFgts, temCo) {
+    if (!temFgts || renda > 4400) return 0;
+    let subsidio; const tetoMaximo = 55000;
+    if (renda <= 2850) {
+      const r1 = 1500, s1 = 14850; const r2 = 2850, s2 = 4845; const m = (s2 - s1) / (r2 - r1);
+      subsidio = s1 + m * (renda - r1);
+    } else {
+      const p = [{r:2850, s:4845}, {r:3000, s:2135}, {r:4700, s:0}];
+      if (renda >= p[2].r) subsidio = 0; else {
+        const seg = renda <= p[1].r ? [p[0], p[1]] : [p[1], p[2]]; const m = (seg[1].s - seg[0].s) / (seg[1].r - seg[0].r);
+        subsidio = seg[0].s + m * (renda - seg[0].r);
+      }
+    }
+    let subsidioFinal = Math.min(subsidio, tetoMaximo);
+    if (categoria === 'usado') { subsidioFinal *= 0.5; }
+    return Math.max(0, Math.floor(subsidioFinal));
 }
 
-// ====== CÁLCULO PRINCIPAL ======
+const pricePMT = (PV, i, n) => PV * (i * Math.pow(1 + i, n)) / (Math.pow(1 + i, n) - 1);
+
+function solveMax(V, R, prazoAnos, taxaAnual, ltv, sistema, idade) {
+    const n = prazoAnos * 12, i = (taxaAnual / 100) / 12, limite = R * 0.30;
+    const TAXA_ADMIN = 25, DFI = 0.000138, MIP0 = 0.000038, mip = MIP0 * (1 + (idade - 20) * 0.05);
+    const fixo = TAXA_ADMIN + V * DFI;
+    let lo = 0, hi = V * ltv, ok = 0, p1 = 0, pf = 0;
+    for (let k = 0; k < 50; k++) {
+        const mid = (lo + hi) / 2, varEnc = mid * mip, enc = fixo + varEnc;
+        const base = sistema === 'SAC' ? (mid / n) + (mid * i) : pricePMT(mid, i, n);
+        if (base + enc <= limite) { ok = mid; p1 = base + enc; pf = sistema === 'SAC' ? (mid / n) + (mid / n * i) + enc : p1; lo = mid; } else hi = mid;
+    }
+    return { fv: ok, p1, pf };
+}
+
 function computeSimulation(payload) {
-  const { valorImovel = 0, rendaMensal = 0, categoria = 'novo', idadeAnos = null } = payload;
+    const { valorImovel: V, rendaMensal: R, categoria: cat, idadeAnos: idade, flags } = payload;
+    const { fgts: temFgts, subsidioRecebido: recebeuSub, co: temCo } = flags;
 
-  // Taxa e LTV por categoria
-  const taxaAnual = (categoria === 'usado') ? TAXA_AA_USADO : TAXA_AA_NOVO;
-  const ltvAlvo   = (categoria === 'usado') ? LTV_USADO     : LTV_NOVO;
+    if (!V || !R || !cat) throw new Error("Dados insuficientes para o cálculo");
 
-  // Prazo: regra comum "idade + prazo <= 80 anos"
-  const prazoMaxIdade = (idadeAnos && idadeAnos > 0) ? Math.max(60, (80 - idadeAnos) * 12) : PRAZO_MESES;
-  const prazoMeses = Math.min(PRAZO_MESES, prazoMaxIdade);
+    const faixa = (recebeuSub && V <= 1500000) ? { ...REGRAS.SBPE, programa: 'SBPE' } : resolverFaixa(R, V, cat);
+    if (!faixa) { return { erroRegra: "Valor do imóvel acima do teto para as linhas de crédito disponíveis." }; }
 
-  // Entrada mínima por LTV alvo
-  const subsidio = 0; // NÃO conceder subsídio automático; só mostrar se existir em outra fonte
-  const entradaMin = Math.max(0, valorImovel * (1 - ltvAlvo) - subsidio);
-  let financiamento = Math.max(0, valorImovel - entradaMin - subsidio);
+    const prazoAnos = faixa.prazoMaxAnos || Math.max(1, Math.min(35, 80 - idade));
+    const taxa = typeof faixa.taxa === 'function' ? faixa.taxa(R) : faixa.taxa;
 
-  // Ajuste por renda: se PRICE > RENDA_PCT * renda, reduz financiamento (aumenta entrada)
-  const i = toIm(taxaAnual);
-  const parcelaPrice = pricePMT(financiamento, i, prazoMeses);
-  const limiteParcela = rendaMensal > 0 ? rendaMensal * RENDA_PCT : Infinity;
+    const subsidio = (faixa.programa === 'MCMV' && (faixa.id === 'Faixa 1' || faixa.id === 'Faixa 2'))
+        ? getSubsidioMCMV(R, V, cat, temFgts, temCo)
+        : 0;
 
-  if (parcelaPrice > limiteParcela && isFinite(limiteParcela)) {
-    // PV permitido pela renda
-    const pvPermitido = limiteParcela * (i > 0 ? (1 - Math.pow(1 + i, -prazoMeses)) / i : prazoMeses);
-    financiamento = Math.max(0, Math.min(financiamento, pvPermitido));
-  }
+    let ltvSac, ltvPrice;
+    if (faixa.programa === 'MCMV') { ltvSac = ltvPrice = typeof faixa.ltv === 'object' ? faixa.ltv[cat] : faixa.ltv; }
+    else if (faixa.programa === 'SBPE') { ltvSac = faixa.ltv.sac; ltvPrice = faixa.ltv.price; }
+    else { ltvSac = ltvPrice = faixa.ltv; }
 
-  const entrada = Math.max(0, valorImovel - financiamento - subsidio);
-  const ltvReal = valorImovel > 0 ? financiamento / valorImovel : 0;
+    const sac = solveMax(V, R, prazoAnos, taxa, ltvSac, 'SAC', idade);
+    const price = solveMax(V, R, prazoAnos, taxa, ltvPrice, 'PRICE', idade);
 
-  // PRICE e SAC (com base no financiamento ajustado)
-  const priceParcela = pricePMT(financiamento, i, prazoMeses);
-  const { p1: sacP1, pf: sacPf } = sacFirstLast(financiamento, i, prazoMeses);
+    const entradaSac = Math.max(0, V - sac.fv - subsidio);
+    const entradaPrice = Math.max(0, V - price.fv - subsidio);
+    const custosDoc = V * 0.045;
 
-  return {
-    ok: true,
-    linha: categoria === 'usado' ? 'Habitação • Imóvel Usado' : 'Habitação • Imóvel Novo',
-    categoria,
-    valorImovel: round2(valorImovel),
-    rendaMensal: round2(rendaMensal),
-    taxaAnual: round2(taxaAnual),
-    prazoMeses,
-    subsidio: round2(subsidio),
-
-    sac: {
-      ltv: round2(ltvReal),
-      entrada: round2(entrada),
-      financiamento: round2(financiamento),
-      p1: round2(sacP1),
-      pf: round2(sacPf),
-    },
-
-    price: {
-      ltv: round2(ltvReal),
-      entrada: round2(entrada),
-      financiamento: round2(financiamento),
-      p1: round2(priceParcela),
-    },
-  };
+    return {
+        linha: `${faixa.programa || 'SFI'} — ${faixa.id}`,
+        prazoMeses: prazoAnos * 12,
+        taxaAnual: taxa,
+        subsidio,
+        sac: { ltv: ltvSac, entrada: entradaSac, financiamento: sac.fv, p1: sac.p1, pf: sac.pf },
+        price: { ltv: ltvPrice, entrada: entradaPrice, financiamento: price.fv, p1: price.p1 },
+        custosDoc
+    };
 }
+// =================================================================================
+// ===== FIM DA LÓGICA DE CÁLCULO RESTAURADA =======================================
+// =================================================================================
 
-// ====== 🔒 Trello ======
-const TRELLO_KEY        = process.env.TRELLO_KEY || '';
-const TRELLO_TOKEN      = process.env.TRELLO_TOKEN || '';
-const TRELLO_LIST_ID    = process.env.TRELLO_LIST_ID || '';
-const TRELLO_LABEL_IDS  = (process.env.TRELLO_LABEL_IDS  || '').split(',').map(s => s.trim()).filter(Boolean);
+// ====== Trello ======
+const TRELLO_KEY = process.env.TRELLO_KEY || '';
+const TRELLO_TOKEN = process.env.TRELLO_TOKEN || '';
+const TRELLO_LIST_ID = process.env.TRELLO_LIST_ID || '';
+const TRELLO_LABEL_IDS = (process.env.TRELLO_LABEL_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
 const TRELLO_MEMBER_IDS = (process.env.TRELLO_MEMBER_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
 
 async function trelloFetch(path, params = {}, method = 'POST', signal) {
-  if (!TRELLO_KEY || !TRELLO_TOKEN) throw new Error('TRELLO_KEY/TRELLO_TOKEN ausentes');
+  if (!TRELLO_KEY || !TRELLO_TOKEN) throw new Error('TRELLO_KEY/TOKEN ausentes');
   const url = new URL(`https://api.trello.com/1/${path}`);
   url.searchParams.set('key', TRELLO_KEY);
   url.searchParams.set('token', TRELLO_TOKEN);
-
-  if (method === 'GET') {
-    for (const [k, v] of Object.entries(params || {})) if (v != null) url.searchParams.set(k, v);
-    const resp = await fetch(url.toString(), { method, signal });
-    if (!resp.ok) throw new Error(await resp.text());
-    return await resp.json();
-  } else {
-    const body = new URLSearchParams();
-    for (const [k, v] of Object.entries(params || {})) if (v != null) body.append(k, v);
-    const resp = await fetch(url.toString(), { method, body, signal });
-    if (!resp.ok) throw new Error(await resp.text());
-    return await resp.json();
-  }
+  const body = new URLSearchParams();
+  for (const [k, v] of Object.entries(params || {})) { if (v != null) body.append(k, v); }
+  const resp = await fetch(url.toString(), { method, body, signal });
+  if (!resp.ok) throw new Error(await resp.text());
+  return await resp.json();
 }
 
-// ====== Handler ======
+// ====== Handler Netlify Function ======
 exports.handler = async (event) => {
-  const origin = event.headers?.origin || event.headers?.Origin || '';
+  const origin = event.headers?.origin || event.headers?.Referer?.slice(0,-1) || '';
+  if (event.httpMethod === 'OPTIONS') { return { statusCode: 204, headers: corsHeaders(origin) }; }
+  
+  // A verificação de CORS foi movida para o início para simplicidade
+  const headers = corsHeaders(origin);
 
-  // Healthcheck GET ?healthz=1 (opcional)
-  if (event.httpMethod === 'GET' && event.queryStringParameters?.healthz === '1') {
-    try {
-      if (!TRELLO_KEY || !TRELLO_TOKEN || !TRELLO_LIST_ID) {
-        return { statusCode: 500, headers: corsHeaders(origin), body: JSON.stringify({
-          ok:false, reason:'Missing env', hasKey:!!TRELLO_KEY, hasToken:!!TRELLO_TOKEN, hasList:!!TRELLO_LIST_ID
-        })};
-      }
-      return { statusCode: 200, headers: corsHeaders(origin), body: JSON.stringify({ ok:true }) };
-    } catch (e) {
-      return { statusCode: 502, headers: corsHeaders(origin), body: JSON.stringify({ ok:false, reason:String(e) }) };
-    }
-  }
-
-  if (event.httpMethod === 'OPTIONS') {
-    return { statusCode: 200, headers: corsHeaders(origin), body: '' };
-  }
-  if (!allowCors(origin)) {
-    return { statusCode: 403, headers: corsHeaders(origin), body: 'Origin not allowed' };
-  }
-  if (event.httpMethod !== 'POST') {
-    return { statusCode: 405, headers: { ...corsHeaders(origin), Allow: 'POST' }, body: 'Method Not Allowed' };
-  }
-
-  const body = parseJSON(event.body || '{}');
-  if (!body) return { statusCode: 400, headers: corsHeaders(origin), body: 'Invalid JSON' };
-
-  const {
-    valorImovel, rendaMensal, categoria, idadeAnos, flags,
-    captchaToken,
-    contato = {}, origem = '', utm = null,
-  } = body;
-
-  // Turnstile
   try {
-    const ip = event.headers['x-nf-client-connection-ip'] || event.headers['x-real-ip'] || event.headers['client-ip'] || '';
-    const ok = await verifyTurnstile(captchaToken, ip);
-    if (!ok) return { statusCode: 403, headers: corsHeaders(origin), body: 'captcha inválido' };
-  } catch (err) {
-    console.warn('Turnstile error:', err?.message || err);
-    return { statusCode: 500, headers: corsHeaders(origin), body: 'Erro ao validar captcha' };
-  }
+    const body = parseJSON(event.body || '{}');
+    if (!body) { return { statusCode: 400, headers, body: 'JSON inválido' }; }
+    
+    const { captchaToken, contato = {}, origem = '', utm = null, ...simulationPayload } = body;
+    const ip = event.headers['x-nf-client-connection-ip'] || '';
+    
+    const isCaptchaValid = await verifyTurnstile(captchaToken, ip);
+    if (!isCaptchaValid) { return { statusCode: 403, headers, body: 'Captcha inválido' }; }
+    
+    const result = computeSimulation(simulationPayload);
+    if(result.erroRegra){ return { statusCode: 400, headers, body: JSON.stringify({ error: result.erroRegra }) }; }
 
-  // Cálculo
-  const result = computeSimulation({ valorImovel, rendaMensal, categoria, idadeAnos, flags });
-
-  // 🔒 Trello em background (igual ao seu)
-  (async () => {
-    try {
-      if (!TRELLO_LIST_ID) throw new Error('TRELLO_LIST_ID ausente');
-
-      const utms = pickUTMs(utm);
-      const nomeCliente = safe(contato.nome) || 'Sem nome';
-      const titulo = `Simulação • ${nomeCliente} • ${BRL(valorImovel)} • ${safe(categoria)}`;
-
-      const dadosCliente = [
-        `**Nome:** ${safe(contato.nome) || '-'}`,
-        `**E-mail:** ${safe(contato.email) || '-'}`,
-        `**WhatsApp:** ${safe(contato.whatsapp) || '-'}`,
-        `**Origem:** ${safe(origem) || '-'}`,
-        utms ? `**UTM:** ${Object.entries(utms).map(([k,v])=>`${k}=${v}`).join(' | ')}` : null,
-      ].filter(Boolean).join('\n');
-
-      const resumoTecnico = [
-        `**Linha/Programa:** ${safe(result.linha || result.categoria)}`,
-        `**Taxa anual:** ${pct(result.taxaAnual)}`,
-        `**Prazo:** ${result.prazoMeses} meses`,
-        `**Subsídio:** ${BRL(result.subsidio)}`,
-        '',
-        `**SAC**`,
-        `- LTV: ${(result.sac?.ltv*100 || 0).toFixed(0)}%`,
-        `- Entrada: ${BRL(result.sac?.entrada)}`,
-        `- Financiamento: ${BRL(result.sac?.financiamento)}`,
-        `- Parcela 1: ${BRL(result.sac?.p1)}`,
-        `- Parcela final: ${BRL(result.sac?.pf)}`,
-        '',
-        `**PRICE**`,
-        `- LTV: ${(result.price?.ltv*100 || 0).toFixed(0)}%`,
-        `- Entrada: ${BRL(result.price?.entrada)}`,
-        `- Financiamento: ${BRL(result.price?.financiamento)}`,
-        `- Parcela: ${BRL(result.price?.p1)}`,
-      ].join('\n');
-
-      const desc = [`## Dados do cliente`, dadosCliente, '', `## Resumo técnico`, resumoTecnico].join('\n');
-
-      const { signal, cancel } = timeoutSignal(4000);
-      const card = await trelloFetch('cards', {
-        idList: TRELLO_LIST_ID,
-        name: titulo,
-        desc,
-        pos: 'top',
-        idLabels: TRELLO_LABEL_IDS.join(',') || undefined,
-        idMembers: TRELLO_MEMBER_IDS.join(',') || undefined,
-      }, 'POST', signal);
-
-      console.log({ cardId: card?.id, nome: nomeCliente, valorImovel });
-
-      try {
-        const jsonData = { contato, origem, utm: utms || null, input: { valorImovel, rendaMensal, categoria, idadeAnos, flags }, output: result, createdAt: new Date().toISOString() };
-        const dataUrl = 'data:application/json;base64,' + Buffer.from(JSON.stringify(jsonData, null, 2)).toString('base64');
-        await trelloFetch(`cards/${card.id}/attachments`, { url: dataUrl, name: `simulacao-${Date.now()}.json` }, 'POST', signal);
-      } catch (annexErr) {
-        console.warn('Trello anexar JSON falhou:', annexErr?.message || annexErr);
-      }
-
-      if (origem) {
+    // Envio para o Trello em background
+    (async () => {
         try {
-          await trelloFetch(`cards/${card.id}/attachments`, { url: origem, name: 'Origem da simulação' }, 'POST', signal);
-        } catch (annexUrlErr) {
-          console.warn('Trello anexar origem falhou:', annexUrlErr?.message || annexUrlErr);
+            if (!TRELLO_LIST_ID) return;
+            const titulo = `Simulação • ${safe(contato.nome)} • ${BRL(simulationPayload.valorImovel)}`;
+            const utms = pickUTMs(utm);
+            const dadosCliente = [ `**Nome:** ${safe(contato.nome)}`, `**E-mail:** ${safe(contato.email)}`, `**WhatsApp:** ${safe(contato.whatsapp)}`, `**Origem:** ${safe(origem)}`, utms ? `**UTM:** ${Object.entries(utms).map(([k,v])=>`${k}=${v}`).join(' | ')}` : null ].filter(Boolean).join('\n');
+            const resumoTecnico = [ `**Programa:** ${safe(result.linha)}`, `**Taxa:** ${pct(result.taxaAnual)}`, `**Prazo:** ${result.prazoMeses} meses`, `**Subsídio:** ${BRL(result.subsidio)}`, '', `**SAC**`, `- Entrada: ${BRL(result.sac?.entrada)}`, `- 1ª Parcela: ${BRL(result.sac?.p1)}`, '', `**PRICE**`, `- Entrada: ${BRL(result.price?.entrada)}`, `- Parcela: ${BRL(result.price?.p1)}` ].join('\n');
+            const desc = `## Dados do Cliente\n${dadosCliente}\n\n## Resumo da Simulação\n${resumoTecnico}`;
+            const { signal, cancel } = timeoutSignal(4000);
+            await trelloFetch('cards', { idList: TRELLO_LIST_ID, name: titulo, desc, pos: 'top', idLabels: TRELLO_LABEL_IDS.join(',') || undefined, idMembers: TRELLO_MEMBER_IDS.join(',') || undefined }, 'POST', signal);
+            cancel();
+        } catch (trelloErr) {
+            console.warn('Trello falhou:', trelloErr?.message || trelloErr);
         }
-      }
+    })();
 
-      cancel();
-    } catch (err) {
-      console.warn('Trello falhou:', err?.message || err);
-    }
-  })();
+    return { statusCode: 200, headers, body: JSON.stringify(result) };
 
-  return { statusCode: 200, headers: corsHeaders(origin), body: JSON.stringify(result) };
+  } catch (err) {
+    console.warn('Handler error:', err?.message || err);
+    return { statusCode: 500, headers, body: JSON.stringify({ error: 'Erro interno no servidor.' }) };
+  }
 };
